@@ -2,7 +2,7 @@
 
 **Cycle:** nodus-mcp v0.1
 **Phase 0 date:** 2026-05-28
-**Status:** Partially locked. See "Open decisions" section below.
+**Status:** Fully locked. All 16 decisions settled as of 2026-05-28.
 **Maintainer:** Shawn Knight (Masterplanner25)
 
 ---
@@ -14,9 +14,8 @@ nodus-mcp v0.1. It follows the structure of nodus-lang's
 `docs/design/v4/00-phase-0-decisions.md`. Each decision records: what
 was decided, the source of the decision, and implementation implications.
 
-Phase 0 is complete when all items in the "Open decisions" section are
-resolved. Phase 1 (design docs for each Phase A–N implementation phase)
-begins after.
+Phase 0 is complete when all open decisions are resolved. All 16 decisions
+are settled as of 2026-05-28. Phase 1 design docs can begin.
 
 ---
 
@@ -154,8 +153,7 @@ def mcp_tool_handler(args):
     return result
 ```
 
-The `elicitation_callback` integration point is an open decision (see
-"Open decisions" §M3).
+The `elicitation_callback` integration point is settled in Decision 13.
 
 ---
 
@@ -165,8 +163,8 @@ The `elicitation_callback` integration point is an open decision (see
 timeout, the handler raises a `tool_error` err record with
 `category: "elicitation_timeout"` back to the Nodus script.
 
-**Source:** Design conversation (2026-05-28). The mechanism is settled; the
-default value is open (see "Open decisions").
+**Source:** Design conversation (2026-05-28). The mechanism is settled here;
+the default value is settled in Decision 14 (5 minutes, per-invocation configurable).
 
 **Why:** The blocking handler model (Decision 5) requires a safety valve.
 Without a timeout, a script waiting for human elicitation input could block
@@ -265,141 +263,228 @@ claim; client-only leaves half the story unbuilt.
 
 ---
 
-## Open decisions — NOT yet settled, require chat resolution before Phase 1 design
+## Decision 11 — Transport scope: stdio + HTTP only (corrects Decision 16)
 
-The following items have not been decided. No defaults are assumed. Phase 1
-design docs cannot be written until these are resolved.
+**Decision:** nodus-mcp v0.1 implements **two transports**: stdio and HTTP.
+The original Decision 16 named three (stdio, HTTP, Streamable HTTP), but this
+was written against the 2025-11-25 spec. The 2026-07-28 RC's stateless model
+collapsed the "HTTP" vs "Streamable HTTP" distinction: with no sessions and no
+SSE required for basic calls, what the RC calls the HTTP transport subsumes
+what the pre-RC spec called Streamable HTTP. There is no separate "Streamable
+HTTP transport" in the RC's model.
 
----
+**Source:** Design conversation (2026-05-28); validated against feasibility
+report RC analysis. This is a **correction**, not a scope cut — the capability
+surface is the same, the transport count is two not three because the RC
+merged them.
 
-### M1 — Transport scope for v0.1
+**Why:** The pre-RC transport distinction arose from the need to distinguish
+between SSE-streamed responses (Streamable HTTP) and simple request/response
+HTTP. The RC eliminates SSE requirements for the base transport; streaming
+(e.g. progress notifications) flows through `_meta` and is a message-level
+feature, not a transport-level feature.
 
-**Question:** The original Decision 16 listed three transports: stdio, HTTP,
-and Streamable HTTP (in that implementation order, Phases B and G). The RC's
-stateless model may have collapsed some distinctions:
-
-- stdio transport is still a distinct, well-defined transport (piped
-  process communication, e.g. Claude Desktop's model)
-- HTTP transport in the RC is stateless (no session headers, no SSE
-  required for basic calls) — what exactly is the "HTTP" transport vs
-  the "Streamable HTTP" transport in the stateless model?
-- Does the RC effectively reduce the transport distinction to
-  stdio (stateful connection) vs HTTP (stateless per-request)?
-
-**Specific question:** Which transports does v0.1 implement, and in what
-order? Is the Phase B + Phase G structure still correct, or does the RC
-suggest a different decomposition?
-
----
-
-### M2 — Feature scope: Tasks, MCP Apps, Roots, Sampling, Logging
-
-**Question:** Several MCP capabilities have changed status between 2025-11-25
-and the 2026-07-28 RC:
-
-- **Tasks** moved from core protocol to an official extension (ext-apps). The
-  original Decision 16 had Tasks in Phase H+ (server-side). Does v0.1 include
-  the Tasks extension? Or is Tasks a v0.2 item?
-- **MCP Apps** is a new official extension in the RC (servers ship HTML
-  interfaces). No mention in Decision 16. v0.1 or v0.2?
-- **Roots, Sampling, Logging** are described in the RC as
-  "deprecated-but-functional for 12+ months." Decision 16's Phase F (Client
-  advanced) included all three. Options:
-  - Implement them (they work for ≥12 months, interop is valid)
-  - Skip them (they're on a deprecation path, why build on them now?)
-  - Implement Logging only (most practically useful for observability)?
-
-**Specific question:** Which of {Tasks, MCP Apps, Roots, Sampling, Logging}
-are in v0.1 scope, which are v0.2, and which are explicitly out?
+**Implementation implication:** Phase A (foundation) and Phase B (stdio)
+proceed as originally sequenced. The original Phase G (HTTP transports) is
+now a single implementation item rather than two. Phase sequencing shifts
+accordingly — there is no "Phase G part 2" for a separate Streamable HTTP
+transport.
 
 ---
 
-### M3 — Server-side elicitation callback wiring
+## Decision 12 — Feature scope: Tasks deferred; Roots + Sampling in; MCP Apps + Logging out
 
-**Question:** When nodus-mcp is embedded via `NodusRuntime`, and a Nodus tool
-handler triggers MCP elicitation (the server receives a call, its implementation
-needs user input), how does the host application provide that input?
+**Decision:**
 
-The mechanism is settled (elicitation is encapsulated in the Python handler;
-Decision 5). The wiring is not. Options:
+| Feature | v0.1 status | Reason |
+|---|---|---|
+| Tasks | Deferred to v0.2 | Moved from core to extension in RC; extension is still settling |
+| MCP Apps | Deferred to v0.2+ | New extension, no production maturity, not in Decision 16 original scope |
+| Roots | **Included** | Real interop need with existing servers; 12-month deprecation window is sufficient runway |
+| Sampling | **Included** | Real interop need with existing servers; same 12-month window reasoning |
+| Logging | Skipped entirely | Least essential of the three deprecated capabilities; host application logging (Python's `logging` module, observability pipelines) covers the use cases. Not worth building on a deprecated foundation. |
 
-1. **Python callback registered at construction:**
-   `NodusRuntime(elicitation_handler=my_fn)` — simple, synchronous.
-2. **Channel passed at construction:**
-   `NodusRuntime(elicitation_channel=channel)` — async-native, matches
-   the `_io_channels` substrate (Decision 7).
-3. **Both, caller chooses:** The callback form wraps into a Channel
-   internally; the Channel form is the primitive.
-4. **Not in v0.1 server role:** Server-side elicitation is deferred; v0.1
-   server only handles tools that don't need elicitation.
+**Source:** Design conversation (2026-05-28).
 
-**Specific question:** Which form, and does v0.1 server support elicitation
-at all?
+**On the deprecation window:** Roots and Sampling are described in the RC as
+deprecated-but-functional for ≥12 months. v0.1 is built knowing they are
+scheduled for removal. The 12-month window is sufficient for v0.1's useful
+life and for downstream users to migrate. nodus-mcp's own deprecation notice
+for these features will land before the protocol removes them.
 
----
-
-### M4 — Elicitation timeout default value
-
-**Question:** Decision 6 settles the mechanism (elicitation_timeout err record).
-The default value is not settled. Candidates:
-
-- `30s` — tight for human interaction, right for automated pipelines
-- `5m` — reasonable for interactive use, may be too long for pipelines
-- `None` (no default timeout, caller must set one) — explicit but friction-heavy
-- `configurable at construction with a sensible default`
-
-**Specific question:** What is the default timeout value, and is it
-per-invocation, per-handler, or per-runtime?
+**Implementation implication:** Phase F (Client advanced) in Decision 16's
+original sequencing covered sampling, logging, progress, completion, roots,
+and elicitation. In v0.1: phase F implements Roots, Sampling, and Elicitation
+(via SEP-2322 MRTR). Logging is removed from Phase F entirely. Tasks is
+removed from server phases (H+) and treated as a v0.2 extension.
 
 ---
 
-### M5 — Authorization depth
+## Decision 13 — Server-side elicitation callback wiring: Python callback primary
 
-**Question:** The 2026-07-28 RC hardened authorization (the Decision 16
-amendment mentioned bearer tokens as the v0.1 scope, with OAuth2/OIDC/mTLS
-deferred to v0.2). The RC added explicit authorization-related capability
-flags and may have changed the bearer token flow. Options:
+**Decision:** Host applications that embed nodus-mcp and need to handle
+server-side elicitation (a Nodus tool handler mid-call asking the user for
+input) register a Python callback via `runtime.set_elicitation_handler(fn)`.
 
-- Bearer token only, exactly as Decision 16 scoped
-- Bearer token + API key (the RC's "HTTP auth" mechanisms, which are low-cost
-  to add alongside bearer)
-- Full OAuth2 client credentials (the RC seems to have explicit support for
-  this; adds significant complexity)
+**Callback contract:**
 
-**Specific question:** What authorization schemes does v0.1 implement? Is the
-Decision 16 "bearer only" scope still correct given the RC's changes, or does
-the RC's authorization structure warrant expanding slightly?
+```python
+# Registered on the NodusRuntime instance that owns the MCP server
+runtime.set_elicitation_handler(my_elicitation_fn)
+
+# Callback signature:
+def my_elicitation_fn(request: dict) -> dict:
+    # request is the inputRequest dict from SEP-2322, e.g.:
+    # {"method": "elicitation/create", "params": {"message": "...", "requestedSchema": {...}}}
+    # Return one of:
+    return {"action": "accept", "content": {"field": "value"}}
+    # or:
+    return {"action": "decline"}
+```
+
+If no callback is registered and a tool handler triggers elicitation,
+`tool.invoke` returns a `tool_error` err record with
+`category: "elicitation_unsupported"` to the Nodus script.
+
+**Source:** Design conversation (2026-05-28). Channel-based wiring is deferred
+to v0.2 if real async host applications surface a genuine need for it.
+
+**Why:** The Python callback form is simple, synchronous, and matches how
+99% of host applications will handle elicitation (display a prompt, wait for
+user input, return the response). The `_io_channels` mechanism (Decision 7)
+remains the correct production substrate for the internal async plumbing, but
+the host-facing API is the callback. Wrapping channels in a callback adapter
+internally is an implementation detail.
+
+**Implementation implication:** `runtime.set_elicitation_handler(fn)` stores
+`fn` on the `NodusRuntime` instance. The nodus-mcp server module checks for
+it before triggering elicitation; if absent, it short-circuits to
+`elicitation_unsupported`. The `fn` is called synchronously in the handler
+thread; it blocks until the host returns the response.
 
 ---
 
-### M6 — std:tools compatibility surface
+## Decision 14 — Elicitation timeout default: 5 minutes, per-invocation configurable
 
-**Question:** The existing `std:tools` module (Nodus v3.x) exposes
-`tool_call`, `tool_available`, `tool_describe` builtins that make the Nodus
-runtime MCP-callable via a service registration pattern. nodus-mcp's server
-role does similar work through the new `std:tool` registry.
+**Decision:** The default timeout for elicitation waits (Decision 6 mechanism)
+is **5 minutes**. The timeout is configurable per-invocation via the
+`tools/call` call options; a per-runtime default can be set at construction.
 
-This was parked as "semantic-incompatibility-table belongs in Phase 4 docs
-in nodus-lang" — it's now a real nodus-mcp design question. Options:
+**Source:** Design conversation (2026-05-28).
 
-1. **Coexist:** `std:tools` and nodus-mcp server mode both work, addressing
-   different use cases. `std:tools` is for embedding-API tool injection;
-   nodus-mcp server is for MCP-protocol exposure. No migration needed.
-2. **nodus-mcp supersedes:** nodus-mcp's server mode handles everything
-   `std:tools` does and more. Publish a migration guide; `std:tools` becomes
-   a compatibility shim.
-3. **Separate domains:** `std:tools` exposes Nodus to the runtime host
-   (Python embedding); nodus-mcp exposes Nodus to MCP clients (over the
-   network). They're not the same thing — no conflict, no migration needed.
+**Why 5 minutes:** Short enough that a forgotten elicitation (e.g. a
+background script left waiting for human input with no one watching) doesn't
+hang a process indefinitely. Long enough to accommodate realistic human-input
+latency for interactive use: a user who takes 3 minutes to fill a form is
+within the window; a user who took a coffee break and came back is not, and
+that's acceptable. 30 seconds would be too tight for any interactive use.
+None (no default) creates friction for every caller. 5 minutes is the
+idiomatic choice for human-in-the-loop flows across the ecosystem.
 
-**Specific question:** Are `std:tools` and nodus-mcp server mode solving the
-same problem or different problems? If different, what's the boundary?
+**Implementation implication:** The elicitation wait uses a `threading.Event`
+or equivalent with a `timeout=300` (300 seconds = 5 minutes). On expiry:
+raises `tool_error` / `category: "elicitation_timeout"` (Decision 6). The
+per-invocation override is passed through `tool.invoke` call metadata or
+the transport's call options dict. Construction: `McpClient(elicitation_timeout_s=120)`
+overrides the default for all invocations on that client.
 
 ---
 
-## Phase 1 gate
+## Decision 15 — Authorization: bearer token only in v0.1
 
-Phase 1 begins when all six open decisions (M1–M6) are resolved in a chat
-session that produces an amendment to this document. Each resolved decision
-gets a new numbered entry in the "settled" section above. Phase 1 design docs
-then spec out the first implementation phases.
+**Decision:** nodus-mcp v0.1 supports **bearer token authentication only**.
+OAuth2/OIDC is deferred to v0.2. v0.1 cannot connect to MCP servers that
+require OAuth2 — this limitation is documented prominently in the README.
+
+**Source:** Decision 16 amendment (nodus-lang `V4_0_PLAN.md`); design
+conversation (2026-05-28). Matches nodus-a2a's planned auth posture for
+ecosystem consistency.
+
+**Why:** OAuth2 client credentials flow adds significant implementation
+complexity (token refresh, PKCE, well-known discovery, error handling for
+expired tokens). Bearer tokens cover the common case: API keys and session
+tokens, which is how most MCP servers in the current ecosystem authenticate.
+The v0.2 timeline is not blocked on v0.1's bearer-only limitation since
+the tool call / discovery path is identical regardless of auth scheme —
+only the HTTP headers differ.
+
+**Implementation implication:** The HTTP transport adds an `Authorization:
+Bearer <token>` header when a token is configured. Token is passed at
+connection time: `mcp.connect(url, bearer_token="...")`. The `server/discover`
+call and all subsequent tool calls carry the token. No token rotation, no
+refresh. The README clearly states: "v0.1 does not support OAuth2. Servers
+requiring OAuth authentication are not supported until v0.2."
+
+---
+
+## Decision 16 — std:tools compatibility: separate domains, no conflict
+
+**Decision:** `std:tools` (the existing Nodus v3.x module with `tool_call`,
+`tool_available`, `tool_describe` builtins) and nodus-mcp's server role solve
+**different problems** and coexist without conflict in v0.1.
+
+- `std:tools` exposes the Nodus runtime to a **Python host application** via
+  the embedding API's service registration pattern — this is a Python-to-Nodus
+  boundary, not a network boundary.
+- nodus-mcp server exposes Nodus tools to **MCP clients over the network** via
+  the MCP protocol — this is a network boundary.
+
+They are not in the same domain. A Nodus tool registered via `std:tool.register`
+and a `std:tools` service registered by the Python host are different things.
+There is no migration needed between them in v0.1.
+
+**Source:** Design conversation (2026-05-28). This resolves the
+"semantic-incompatibility-table" question parked in nodus-lang's
+TECH_DEBT.md (3C.2 commit notes).
+
+**v0.2 plan:** nodus-mcp v0.2 will add a "runtime-tool registration" feature
+that makes the nodus-mcp server automatically expose tools registered in
+`std:tool` to MCP clients, without any Python embedding plumbing. At that
+point, `std:tools` (which previously served as the mechanism for "host
+registers tools that Nodus calls") becomes formally deprecated with the
+semantic-incompatibility table from the 3C.2 commit notes as the migration
+map. v0.1 does not trigger this deprecation.
+
+**Implementation implication for v0.1:** The server module's `tools/list`
+handler enumerates `NodusRuntime.tool_registry.list_tools()` — only tools
+registered via `std:tool.register` (Decision 3). It does NOT enumerate
+`std:tools` services. The two systems are invisible to each other in v0.1.
+
+---
+
+## Phase 0 complete — Phase 1 plan
+
+All 16 decisions are settled. Phase 0 is complete as of 2026-05-28.
+
+### What Phase 1 covers
+
+Phase 1 produces approximately five focused design docs, one per major
+design area, before implementation begins:
+
+1. **Adapter mapping core** — how the stateless request model (no sessions,
+   `_meta` per-request, `server/discover`) maps onto the Nodus tool registry.
+   The source-of-truth contract between the MCP wire format and `std:tool`
+   entry shapes.
+
+2. **Elicitation via `_io_channels`** — the full MRTR loop (SEP-2322),
+   callback wiring (Decision 13), timeout (Decision 14), error contract
+   (Decision 6), and test substrate (flush_async/advance_clock). This is the
+   most complex single design area and warrants its own doc.
+
+3. **Transports** — stdio + HTTP (Decision 11). Shared-core design so that
+   switching transports doesn't change the tool-invocation path. Message
+   framing, connection lifecycle, error propagation.
+
+4. **Server mode** — tool registry → MCP enumeration, request routing,
+   server-side elicitation (Decision 13), bearer auth on the server side
+   (Decision 15). Scope explicitly excludes `std:tools` interop until v0.2
+   (Decision 16).
+
+5. **Deprecated-feature handling** — Roots and Sampling in v0.1 (Decision 12).
+   Implementation strategy for building against deprecated protocol features:
+   the deprecation notice the library will carry, the plan for removal when the
+   protocol removes them, and how tests are structured to catch when the
+   features stop working.
+
+These five docs are Phase 1. Once they exist, Phase A (foundation) can be
+implemented against them.
