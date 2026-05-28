@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nodus-mcp"
+version = "0.1.0.dev0"
+description = "MCP (Model Context Protocol) library for Nodus — bidirectional client + server"
+authors = [{ name = "Shawn Knight" }]
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "nodus-lang>=4.0.0",
+]
+
+[project.entry-points."nodus.nd"]
+nodus-mcp = "nodus_mcp.nd:get_nd_root"
+
+[project.urls]
+Homepage = "https://github.com/Masterplanner25/nodus-mcp"
+Repository = "https://github.com/Masterplanner25/nodus-mcp"
+Changelog = "https://github.com/Masterplanner25/nodus-mcp/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nodus_mcp = ["nd/*.nd"]
