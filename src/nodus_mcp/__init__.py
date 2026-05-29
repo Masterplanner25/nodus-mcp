@@ -39,6 +39,7 @@ from .protocol import (
 from .codec import McpCodec
 from .transport import McpTransport, McpServerTransport, TransportError
 from .connection import McpConnection, ActiveElicitationRegistry, TEARDOWN_SENTINEL
+from .stdio import StdioTransport
 
 __all__ = [
     "__version__",
@@ -80,4 +81,6 @@ __all__ = [
     "McpConnection",
     "ActiveElicitationRegistry",
     "TEARDOWN_SENTINEL",
+    # Transports
+    "StdioTransport",
 ]
