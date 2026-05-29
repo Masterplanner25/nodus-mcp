@@ -54,6 +54,7 @@ from .connection import McpConnection, ActiveElicitationRegistry, TEARDOWN_SENTI
 from .stdio import StdioTransport
 from .http import HttpTransport
 from .client import McpClient
+from .server import McpServer
 
 __all__ = [
     "__version__",
@@ -98,8 +99,9 @@ __all__ = [
     # Transports
     "StdioTransport",
     "HttpTransport",
-    # Client
+    # Client + Server
     "McpClient",
+    "McpServer",
     # Resources (Phase D)
     "METHOD_RESOURCES_LIST",
     "METHOD_RESOURCES_READ",

@@ -51,10 +51,11 @@ class McpServerTransport(ABC):
     def serve(self, handler: Callable[[str, dict, object], dict | None]) -> None:
         """Accept and dispatch requests until close() is called.
 
-        handler(method: str, params: dict, request_id: object) -> dict | None
+        handler(method: str, params: dict, request_id: object) -> dict
           Called synchronously for each inbound request.
-          Return value is sent as the JSON-RPC result.
-          Raise to produce a JSON-RPC error response.
+          Must return a complete JSON-RPC response dict (jsonrpc + id +
+          result or error). McpServer.dispatch() is the canonical handler
+          — it never raises. Phase M transports pass server.dispatch directly.
         """
 
     @abstractmethod
