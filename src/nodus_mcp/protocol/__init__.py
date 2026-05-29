@@ -81,6 +81,7 @@ __all__ = [
     "METHOD_RESOURCES_READ",
     "METHOD_PROMPTS_LIST",
     "METHOD_PROMPTS_GET",
+    "METHOD_ELICITATION_CREATE",
     "ResourceDescriptor",
     "ResourceContent",
     "PromptArgument",

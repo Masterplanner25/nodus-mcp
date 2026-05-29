@@ -12,6 +12,14 @@ Failure modes handled:
     then teardowns elicitations, then kills the process (FM-3).
   - Reader outliving close(): join with 2-second timeout; force-kill backstop (FM-4).
   - Send after close: checked under lock before registering a waiter (FM-5).
+
+Phase F adds the routing third-case in _dispatch:
+  - Response (id present, method absent) → pending waiter [existing]
+  - Notification (method present, id absent) → notification_handler [existing]
+  - Inbound request (method + id both present) → _handle_inbound_request [F]
+  The daemon-thread inbound handler avoids blocking the reader; _write_lock
+  prevents concurrent write corruption without deadlock (reader holds no lock
+  during handler execution or during the response write).
 """
 from __future__ import annotations
 
@@ -21,7 +29,7 @@ from dataclasses import dataclass, field
 
 from .codec import McpCodec
 from .connection import ActiveElicitationRegistry
-from .protocol.jsonrpc import next_request_id
+from .protocol.jsonrpc import next_request_id, INTERNAL_ERROR
 from .transport import McpTransport, TransportError
 
 
@@ -60,6 +68,7 @@ class StdioTransport(McpTransport):
         self._write_lock = threading.Lock()
         self._closed = False
         self._notification_handler = None  # optional hook for server notifications
+        self._inbound_request_handler = None  # callable(method, params) → dict; Phase F
 
         try:
             self._proc = subprocess.Popen(
@@ -243,24 +252,81 @@ class StdioTransport(McpTransport):
                 self._elicitation_registry.teardown()
 
     def _dispatch(self, msg: dict) -> None:
-        """Route an inbound message to the correct waiter (by id) or to the
-        notification handler (no id)."""
+        """Route an inbound message to the correct handler.
+
+        Three cases (Phase F adds the third):
+          method absent, id present  → response to our request   (pending waiter)
+          method present, id absent  → server notification        (notification_handler)
+          method present, id present → server-initiated request   (_inbound_request_handler)
+        """
+        has_method = "method" in msg
         msg_id = msg.get("id")
-        if msg_id is not None:
-            with self._pending_lock:
-                waiter = self._pending.pop(msg_id, None)
-            if waiter is not None:
-                waiter.result_box[0] = msg
-                waiter.wake_event.set()
-            # Unexpected id (no matching waiter): ignore; not a fatal condition.
-        else:
-            # Server-initiated notification (no id).
+
+        if not has_method:
+            # Response to one of our send_request() calls
+            if msg_id is not None:
+                with self._pending_lock:
+                    waiter = self._pending.pop(msg_id, None)
+                if waiter is not None:
+                    waiter.result_box[0] = msg
+                    waiter.wake_event.set()
+        elif msg_id is None:
+            # Server-sent notification (method present, no id)
             handler = self._notification_handler
             if handler is not None:
                 try:
                     handler(msg)
                 except Exception:
                     pass
+        else:
+            # Inbound server-initiated request (method + id both present)
+            self._handle_inbound_request(msg_id, msg["method"], msg.get("params") or {})
+
+    def _handle_inbound_request(self, req_id: object, method: str, params: dict) -> None:
+        """Dispatch an inbound server-initiated request.
+
+        Spawns a daemon thread so the reader loop is not blocked while the
+        handler runs (sampling LLM calls, elicitation waiting for a human).
+        The daemon thread calls _send_raw_response when done.
+        """
+        handler = self._inbound_request_handler
+        if handler is None:
+            # No handler wired — nothing to respond with; send a minimal error
+            # so the server knows we can't service this method.
+            resp = self._codec.make_internal_error("No inbound request handler configured", req_id)
+            self._send_raw_response(resp)
+            return
+        threading.Thread(
+            target=self._execute_inbound,
+            args=(req_id, method, params, handler),
+            daemon=True,
+        ).start()
+
+    def _execute_inbound(self, req_id: object, method: str, params: dict, handler) -> None:
+        """Run handler synchronously in a daemon thread, then write the response."""
+        try:
+            result = handler(method, params)
+            response = self._codec.make_result_response(result, req_id)
+        except Exception as exc:
+            response = self._codec.make_error_response(INTERNAL_ERROR, str(exc), req_id)
+        self._send_raw_response(response)
+
+    def _send_raw_response(self, response: dict) -> None:
+        """Write a pre-built response dict to stdin without registering a waiter.
+
+        Used by the inbound-request path (F) to send responses back to the
+        server. Thread-safe: acquires _write_lock. No deadlock risk because
+        the reader thread never holds _write_lock.
+        """
+        if self._closed:
+            return
+        raw = self._codec.encode_response(response)
+        try:
+            with self._write_lock:
+                self._proc.stdin.write(raw)
+                self._proc.stdin.flush()
+        except OSError:
+            pass
 
     # ── Introspection (used in tests and diagnostics) ─────────────────────────
 

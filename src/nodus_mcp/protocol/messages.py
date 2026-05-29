@@ -32,6 +32,9 @@ METHOD_RESOURCES_READ = "resources/read"
 METHOD_PROMPTS_LIST = "prompts/list"
 METHOD_PROMPTS_GET = "prompts/get"
 
+# Phase F — server-initiated requests that the client must service
+METHOD_ELICITATION_CREATE = "elicitation/create"     # server asks client for user input
+
 # ── Result type discriminators ────────────────────────────────────────────────
 
 RESULT_TYPE_SUCCESS = "success"

@@ -31,6 +31,9 @@ from .protocol.messages import (
     METHOD_RESOURCES_READ,
     METHOD_PROMPTS_LIST,
     METHOD_PROMPTS_GET,
+    METHOD_ROOTS_LIST,
+    METHOD_SAMPLING_CREATE_MESSAGE,
+    METHOD_ELICITATION_CREATE,
     RESULT_TYPE_INPUT_REQUIRED,
     RequestMeta,
     ToolCallResult,
@@ -47,10 +50,15 @@ _DEFAULT_MAX_ROUNDS: int = 10        # doc 2 B1
 # Distinct from TEARDOWN_SENTINEL (which is transport-teardown-triggered).
 _TIMEOUT_SENTINEL: object = object()
 
-# Client _meta sent with every outbound request (doc 1 C1).
+# Base capabilities always advertised (tools + elicitation).
+# roots and sampling are added dynamically by _build_meta() when configured.
+_CLIENT_INFO = {"name": "nodus-mcp", "version": "0.1.0"}
+
+# Static full-capability meta used in tests and as a fallback constant.
+# Production code uses McpClient._build_meta() for capability gating.
 _CLIENT_META = RequestMeta(
     capabilities={"tools": {}, "elicitation": {}, "roots": {}, "sampling": {}},
-    client_info={"name": "nodus-mcp", "version": "0.1.0"},
+    client_info=_CLIENT_INFO,
 )
 
 
@@ -152,7 +160,7 @@ def _run_tools_call(
     elicitation_registry: ActiveElicitationRegistry | None,
     elicitation_timeout_s: float,
     max_elicitation_rounds: int,
-    client_meta: RequestMeta,
+    get_meta: Callable[[], RequestMeta],
 ) -> dict:
     """Execute one tools/call, driving the full MRTR loop if elicitation occurs.
 
@@ -170,7 +178,7 @@ def _run_tools_call(
     params: dict = {
         "name": raw_name,
         "arguments": args or {},
-        "_meta": client_meta.to_dict(),
+        "_meta": get_meta().to_dict(),
     }
     round_count = 0
 
@@ -280,7 +288,7 @@ def _run_tools_call(
             "arguments": args or {},
             "inputResponses": input_responses,
             "requestState": request_state,   # opaque echo
-            "_meta": client_meta.to_dict(),
+            "_meta": get_meta().to_dict(),
         }
 
 
@@ -310,13 +318,14 @@ def _make_tool_handler(
     elicitation_registry: ActiveElicitationRegistry | None,
     elicitation_timeout_s: float,
     max_elicitation_rounds: int,
-    client_meta: RequestMeta,
+    get_meta: Callable[[], RequestMeta],
 ) -> Callable:
     """Return a Python callable to register in _python_registered_tools.
 
     raw_name is the wire name (alias already stripped — doc 1 B1).
-    get_elicitation_handler is a zero-arg callable returning the current
-    handler (allows handler to be set after connect()).
+    get_elicitation_handler and get_meta are zero-arg callables so handler/meta
+    changes after connect() are reflected in subsequent tool calls (Phase F
+    capability gating — roots/sampling only in _meta when configured).
     """
     def handler(args: dict) -> dict:
         return _run_tools_call(
@@ -327,7 +336,7 @@ def _make_tool_handler(
             elicitation_registry,
             elicitation_timeout_s,
             max_elicitation_rounds,
-            client_meta,
+            get_meta,
         )
     handler.__name__ = f"mcp_handler_{raw_name}"
     return handler
@@ -354,19 +363,52 @@ class McpClient:
         elicitation_registry: ActiveElicitationRegistry | None = None,
     ) -> None:
         self._elicitation_handler: Callable | None = None
+        self._sampling_handler: Callable | None = None   # Phase F2 (doc 5 B3)
         self._elicitation_timeout_s = elicitation_timeout_s
         self._max_elicitation_rounds = max_elicitation_rounds
         self._registry = elicitation_registry or ActiveElicitationRegistry()
         self._connections: dict[str, McpConnection] = {}
+
+    # ── Capability gating (doc 5 C3, doc 4 D2 client mirror) ─────────────────
+
+    def _build_meta(self) -> RequestMeta:
+        """Build the current outbound _meta reflecting configured capabilities.
+
+        roots and sampling are only advertised when configured (doc 5 C3):
+          - roots: present if any connection has roots configured
+          - sampling: present if a sampling handler is registered
+        tools and elicitation are always advertised.
+        """
+        caps: dict = {"tools": {}, "elicitation": {}}
+        if any(conn.roots for conn in self._connections.values()):
+            caps["roots"] = {}
+        if self._sampling_handler is not None:
+            caps["sampling"] = {}
+        return RequestMeta(capabilities=caps, client_info=_CLIENT_INFO)
+
+    # ── Handler registration (Phase C + F) ───────────────────────────────────
 
     def set_elicitation_handler(self, fn: Callable | None) -> None:
         """Register the elicitation callback (doc 2 C1, Decision 13).
 
         fn(request: dict) -> dict  where request has inputRequests, requestState, round.
         Return {"action": "accept", "content": {...}} or {"action": "decline"}.
+        Also invoked for direct elicitation/create inbound requests (Phase F3).
         May be set/changed after connect().
         """
         self._elicitation_handler = fn
+
+    def set_sampling_handler(self, fn: Callable | None) -> None:
+        """Register the sampling callback (doc 5 B3) — symmetric with set_elicitation_handler.
+
+        fn(request: dict) -> dict  where request is the sampling/createMessage params.
+        Return the completion result dict.
+        Absent handler → {"action": "decline"} sent to server.
+        Advertising sampling capability in _meta requires a handler to be set.
+        """
+        self._sampling_handler = fn
+
+    # ── Connection management ────────────────────────────────────────────────
 
     def connect(
         self,
@@ -375,21 +417,33 @@ class McpClient:
         url: str = "",
         bearer_token: str | None = None,
         runtime=None,
+        roots: list | None = None,
     ) -> McpConnection:
         """Discover server tools and (optionally) register them in a NodusRuntime.
 
         Steps (doc 3 D1):
-          1. Send server/discover to learn capabilities and tool list.
+          1. Send server/discover (with capability-gated _meta) to learn tools.
           2. For each tool: create a handler closure (alias stripped — doc 1 B1).
           3. If runtime provided: register each tool as mcp.<alias>.<name>.
-          4. Return McpConnection handle.
+          4. Wire the transport's inbound-request handler (Phase F routing).
+          5. Return McpConnection handle.
 
-        runtime: a NodusRuntime instance. If None, tools are discovered but not
-        registered (useful for unit tests and server-mode usage).
+        roots: list of {uri, name} dicts; if provided, advertise roots capability
+        and auto-respond to roots/list inbound requests (Phase F1, doc 5 A2).
+        runtime: NodusRuntime instance. If None, tools are discovered but not
+        registered (useful for unit tests).
         """
+        # Build meta for discover; temporarily include roots cap if provided now
+        disc_caps: dict = {"tools": {}, "elicitation": {}}
+        if roots:
+            disc_caps["roots"] = {}
+        if self._sampling_handler is not None:
+            disc_caps["sampling"] = {}
+        disc_meta = RequestMeta(capabilities=disc_caps, client_info=_CLIENT_INFO)
+
         discover_resp = transport.send_request(
             METHOD_SERVER_DISCOVER,
-            {"_meta": _CLIENT_META.to_dict()},
+            {"_meta": disc_meta.to_dict()},
         )
 
         if "error" in discover_resp:
@@ -405,7 +459,6 @@ class McpClient:
             or {}
         )
         tools_raw: list = disc_result.get("tools") or []
-
         registered_tools: list[str] = []
 
         for tool_raw in tools_raw:
@@ -419,27 +472,25 @@ class McpClient:
                 (tool_raw.get("annotations") or {}).get("deprecated", False)
             )
 
-            handler = _make_tool_handler(
+            tool_handler = _make_tool_handler(
                 raw_name=raw_name,
                 transport=transport,
                 get_elicitation_handler=lambda: self._elicitation_handler,
                 elicitation_registry=self._registry,
                 elicitation_timeout_s=self._elicitation_timeout_s,
                 max_elicitation_rounds=self._max_elicitation_rounds,
-                client_meta=_CLIENT_META,
+                get_meta=self._build_meta,
             )
 
             namespaced_name = f"mcp.{alias}.{raw_name}"
-
             if runtime is not None:
                 runtime.tool_registry.register({
                     "name": namespaced_name,
-                    "handler": handler,
+                    "handler": tool_handler,
                     "description": description,
                     "schema": input_schema,
                     "deprecated": deprecated,
                 })
-
             registered_tools.append(namespaced_name)
 
         conn = McpConnection(
@@ -450,71 +501,88 @@ class McpClient:
             server_info=server_info,
             server_capabilities=server_caps,
             registered_tools=registered_tools,
+            roots=list(roots) if roots else [],
         )
         self._connections[alias] = conn
+
+        # Wire Phase F inbound-request routing onto the transport (F1+F2+F3).
+        # StdioTransport exposes _inbound_request_handler; other transports may not.
+        if hasattr(transport, "_inbound_request_handler"):
+            transport._inbound_request_handler = self._build_inbound_handler(conn)
+
         return conn
 
     # ── Phase D: resources ───────────────────────────────────────────────────
 
     def resources_list(self, alias: str) -> dict:
-        """Fetch the server's resource list (resources/list).
-
-        Returns the raw result dict: {resources: [{uri, name, mimeType?, description?}]}
-        or a ToolCallResult.error dict on failure.
-        Use ResourceDescriptor.from_dict(r) to parse individual entries.
-        """
+        """Fetch the server's resource list (resources/list)."""
         conn = self._get_connection(alias)
         return _simple_call(
-            conn.transport,
-            METHOD_RESOURCES_LIST,
-            {"_meta": _CLIENT_META.to_dict()},
+            conn.transport, METHOD_RESOURCES_LIST,
+            {"_meta": self._build_meta().to_dict()},
         )
 
     def resources_read(self, alias: str, uri: str) -> dict:
-        """Read one resource by URI (resources/read).
-
-        Returns {contents: [{uri, text?}|{uri, blob?}]} or an error dict.
-        blob values are base64 strings; decoding is the host's responsibility.
-        Use ResourceContent.from_dict(c) to parse individual content items.
-        """
+        """Read one resource by URI (resources/read)."""
         conn = self._get_connection(alias)
         return _simple_call(
-            conn.transport,
-            METHOD_RESOURCES_READ,
-            {"uri": uri, "_meta": _CLIENT_META.to_dict()},
+            conn.transport, METHOD_RESOURCES_READ,
+            {"uri": uri, "_meta": self._build_meta().to_dict()},
         )
 
     # ── Phase E: prompts ─────────────────────────────────────────────────────
 
     def prompts_list(self, alias: str) -> dict:
-        """Fetch the server's prompt list (prompts/list).
-
-        Returns {prompts: [{name, description?, arguments?}]} or an error dict.
-        Use PromptDescriptor.from_dict(p) to parse individual entries.
-        """
+        """Fetch the server's prompt list (prompts/list)."""
         conn = self._get_connection(alias)
         return _simple_call(
-            conn.transport,
-            METHOD_PROMPTS_LIST,
-            {"_meta": _CLIENT_META.to_dict()},
+            conn.transport, METHOD_PROMPTS_LIST,
+            {"_meta": self._build_meta().to_dict()},
         )
 
-    def prompts_get(
-        self,
-        alias: str,
-        name: str,
-        arguments: dict | None = None,
-    ) -> dict:
-        """Fetch a rendered prompt by name (prompts/get).
-
-        Returns {description?, messages: [{role, content}]} or an error dict.
-        Use PromptMessage.from_dict(m) to parse individual messages.
-        """
+    def prompts_get(self, alias: str, name: str, arguments: dict | None = None) -> dict:
+        """Fetch a rendered prompt by name (prompts/get)."""
         conn = self._get_connection(alias)
-        params: dict = {"name": name, "_meta": _CLIENT_META.to_dict()}
+        params: dict = {"name": name, "_meta": self._build_meta().to_dict()}
         if arguments:
             params["arguments"] = arguments
         return _simple_call(conn.transport, METHOD_PROMPTS_GET, params)
+
+    # ── Phase F: inbound-request routing (F1 Roots, F2 Sampling, F3 Elicitation) ─
+
+    def _build_inbound_handler(self, conn: McpConnection) -> Callable:
+        """Return the per-connection callable wired on StdioTransport._inbound_request_handler.
+
+        Handles three server-initiated request methods (Phase F):
+          roots/list           → F1: return this connection's configured roots
+          sampling/createMessage → F2: invoke sampling_handler or decline
+          elicitation/create   → F3: invoke elicitation_handler or decline
+        """
+        roots_snapshot = list(conn.roots)  # copy at connect time; immutable per connection
+
+        def handle(method: str, params: dict) -> dict:
+            if method == METHOD_ROOTS_LIST:
+                # F1: auto-respond with configured roots (doc 5 A2)
+                return {"roots": roots_snapshot}
+
+            if method == METHOD_SAMPLING_CREATE_MESSAGE:
+                # F2: invoke handler or decline (doc 5 B3)
+                fn = self._sampling_handler
+                if fn is None:
+                    return {"action": "decline"}
+                return fn(params)
+
+            if method == METHOD_ELICITATION_CREATE:
+                # F3: invoke elicitation handler or decline (SEP-2322 direct request)
+                fn = self._elicitation_handler
+                if fn is None:
+                    return {"action": "decline"}
+                return fn(params)
+
+            # Unknown method — raise so _execute_inbound sends INTERNAL_ERROR
+            raise ValueError(f"Unknown server-initiated method: {method!r}")
+
+        return handle
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 

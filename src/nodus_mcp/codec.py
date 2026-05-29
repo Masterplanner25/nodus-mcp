@@ -93,3 +93,7 @@ class McpCodec:
 
     def make_internal_error(self, message: str, id: int | str | None) -> dict:
         return self.make_error_response(INTERNAL_ERROR, message, id)
+
+    def encode_response(self, response: dict) -> bytes:
+        """Encode a pre-built response dict to newline-terminated UTF-8 bytes."""
+        return (json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8")

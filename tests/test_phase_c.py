@@ -90,7 +90,7 @@ def _run(responses, handler=None, registry=None, timeout_s=None, max_rounds=None
         elicitation_registry=registry,
         elicitation_timeout_s=timeout_s if timeout_s is not None else _DEFAULT_TIMEOUT_S,
         max_elicitation_rounds=max_rounds if max_rounds is not None else _DEFAULT_MAX_ROUNDS,
-        client_meta=_CLIENT_META,
+        get_meta=lambda: _CLIENT_META,
     )
 
 
@@ -134,7 +134,7 @@ def test_tc1_transport_error_returns_transport_error_category():
 
     result = _run_tools_call(
         "read_file", {}, FailTransport(), None, None,
-        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, _CLIENT_META,
+        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, lambda: _CLIENT_META,
     )
     payload = json.loads(result["content"][0]["text"])
     assert payload["category"] == ToolErrorCategory.TRANSPORT_ERROR.value
@@ -296,7 +296,7 @@ def test_3_round_continuity_carries_request_state():
     result = _run_tools_call(
         "my_tool", {"x": 1}, transport,
         handler, None,
-        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, _CLIENT_META,
+        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, lambda: _CLIENT_META,
     )
 
     assert result.get("isError") is not True
@@ -325,7 +325,7 @@ def test_3_round_request_state_is_never_decoded():
     # Should not raise — client echoes without decoding
     result = _run_tools_call(
         "tool", {}, transport, handler, None,
-        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, _CLIENT_META,
+        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, lambda: _CLIENT_META,
     )
     assert result.get("isError") is not True
     # Verify the invalid b64 was echoed back
@@ -344,7 +344,7 @@ def test_alias_stripped_on_wire():
         "read_file",               # raw_name: already stripped
         {"path": "/tmp/f"},
         transport, None, None,
-        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, _CLIENT_META,
+        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, lambda: _CLIENT_META,
     )
     method, params = transport.last_request()
     assert method == METHOD_TOOLS_CALL
@@ -364,7 +364,7 @@ def test_handler_factory_strips_alias():
         elicitation_registry=None,
         elicitation_timeout_s=_DEFAULT_TIMEOUT_S,
         max_elicitation_rounds=_DEFAULT_MAX_ROUNDS,
-        client_meta=_CLIENT_META,
+        get_meta=lambda: _CLIENT_META,
     )
     handler({"q": "hello"})
     _, params = transport.last_request()
@@ -472,7 +472,7 @@ def test_mcp_client_set_elicitation_handler_after_connect():
         elicitation_registry=client._registry,
         elicitation_timeout_s=client._elicitation_timeout_s,
         max_elicitation_rounds=client._max_elicitation_rounds,
-        client_meta=_CLIENT_META,
+        get_meta=lambda: _CLIENT_META,
     )
     result = handler({})
     assert result.get("isError") is not True
@@ -489,7 +489,7 @@ def test_client_meta_in_every_request():
     handler = lambda req: {"action": "accept", "content": {"q1": "y"}}
     _run_tools_call(
         "tool", {}, transport, handler, None,
-        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, _CLIENT_META,
+        _DEFAULT_TIMEOUT_S, _DEFAULT_MAX_ROUNDS, lambda: _CLIENT_META,
     )
     for _, params in transport.all_requests():
         assert "_meta" in params

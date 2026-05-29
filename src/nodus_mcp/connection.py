@@ -39,6 +39,7 @@ class McpConnection:
     server_info: dict
     server_capabilities: dict
     registered_tools: list[str] = field(default_factory=list)
+    roots: list = field(default_factory=list)  # [{uri, name}] configured at connect time (doc 5 A2)
 
     def close(self) -> None:
         """Close the underlying transport (doc 3 D3).
