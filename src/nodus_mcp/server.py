@@ -136,6 +136,11 @@ class McpServer:
         fn(uri: str) → list[dict]  — each dict is resource content:
             {uri, text?} or {uri, blob?}  (exactly one of text or blob per item)
         Raise KeyError for unknown uri (→ -32601). Raise for other errors (→ -32603).
+
+        CONTRACT (TD-009): Signal "URI not found" by raising KeyError(uri).
+        Any other exception maps to -32603 InternalError, which callers cannot
+        distinguish from a server programming error. Do not raise FileNotFoundError
+        or custom exceptions for the "not found" case — use KeyError.
         """
         self._resource_read_handler = fn
 
@@ -550,6 +555,11 @@ def _encode_request_state(
 
     sentinel_type ("elicit" | "sample" | "roots") is stored so the
     continuation path knows which injection key to use on re-call.
+
+    CONTRACT (TD-010): requestState is sent to the MCP client and echoed back.
+    It is opaque to Nodus scripts but NOT private — a client can inspect or
+    modify it. Never put secrets, tokens, or credentials into the sentinel's
+    state dict. Keep state minimal; it is on the wire.
     """
     import base64 as _b64, json as _json
     blob = {
@@ -618,6 +628,14 @@ def _validate_args(args: dict, schema: dict) -> str | None:
     keeping server.py nodus-lang-import-free. Returns error message or None.
 
     Validation happens before ToolRegistry.invoke() (I3 ordering invariant).
+
+    CONTRACT (TD-008): This validator enforces ONLY:
+      - required-field presence
+      - top-level primitive type (string, integer, number, boolean, object, array)
+    It does NOT enforce: minLength, maxLength, minimum, maximum, enum, pattern,
+    format, additionalProperties, nested schemas, conditional keywords, etc.
+    Tool handlers must not assume full JSON Schema validation. Handlers that
+    require deeper constraints must validate them in the handler body.
     """
     if not schema or schema.get("type") != "object":
         return None

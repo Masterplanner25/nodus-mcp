@@ -2,4 +2,4 @@
 // Status: pre-implementation scaffold.
 // Phase 1 design and Phase A implementation are pending.
 
-let _version = "0.1.0.dev0"
+let _version = "0.1.0"

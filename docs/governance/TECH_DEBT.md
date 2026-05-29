@@ -34,6 +34,47 @@
 **Description:** `ElicitationRequest` sentinel only works for Python callable handlers. Nodus closure handlers cannot issue server-side elicitation in v0.1. Requires `tool.elicit()` builtin (new std:tool function, no new opcode).  
 **Doc:** `docs/design/04-server-mode.md §C2`.
 
+## TD-008: _validate_args enforces a subset of JSON Schema
+
+**Status:** Known v0.1 limitation; documented.  
+**Description:** Phase I's inlined `_validate_args` / `_check_arg_type` validates inbound
+`tools/call` arguments at the top level only: required-field presence and primitive type
+checking (string, integer, number, boolean, object, array). It does NOT enforce deeper
+JSON Schema constraints: `minLength`, `maxLength`, `minimum`, `maximum`, `enum`, `pattern`,
+`format`, `additionalProperties`, nested `$defs`, conditional (`if`/`then`/`else`), etc.
+**Contract for tool authors:** Do not rely on the MCP server to enforce schema constraints
+beyond required-fields and top-level types. A tool handler receiving an argument that
+passes top-level type validation may still violate deeper schema constraints. Handlers
+should validate narrow invariants themselves.  
+**Code site:** `server.py::_validate_args`, `server.py::_check_arg_type`.
+
+## TD-009: resource read handler must signal unknown-URI via KeyError
+
+**Status:** Implicit protocol; documented.  
+**Description:** Phase J maps `KeyError` raised by the `resource_read_handler` to HTTP -32601
+MethodNotFound. This is the adapter's contract with host applications: an unknown URI is
+communicated via `KeyError`, not `FileNotFoundError`, `ValueError`, or a custom exception.
+Any other exception maps to a generic -32603 InternalError, which the caller cannot
+distinguish from a programming error.
+**Contract for resource handler authors:** Signal "URI not found" by raising `KeyError(uri)`.
+Use other exceptions for genuine errors (read failure, permission denied) — those will
+surface as -32603.  
+**Code site:** `server.py::_handle_resources_read`.
+
+## TD-010: requestState is visible to the MCP client; never checkpoint secrets
+
+**Status:** By-design constraint; documented.  
+**Description:** Phase L's server-issued re-call pattern encodes tool continuation state
+into `requestState` and sends it to the calling MCP client in the `InputRequiredResult`
+response. The client echoes it back unchanged. The blob is opaque to Nodus scripts (below
+the VM boundary) but is NOT private — it travels across the wire to the client and back,
+and a hostile client could inspect or modify it.
+**Contract for tool authors returning ElicitationRequest/SamplingRequest:** The `state` dict
+placed in the sentinel (and encoded into `requestState`) must not contain secrets, tokens,
+or credentials. Keep it minimal — tool checkpoint only. The client holds this state between
+rounds.  
+**Code site:** `server.py::_encode_request_state`.
+
 ## TD-007: Server-initiated requests over HTTP deferred to v0.2
 
 **Status:** Deferred to v0.2, known v0.1 asymmetry.  

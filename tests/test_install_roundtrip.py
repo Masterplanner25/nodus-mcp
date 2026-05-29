@@ -75,7 +75,7 @@ class EntryPointRoundtripTest(unittest.TestCase):
             )
         stdout = out.getvalue().strip()
         self.assertEqual(
-            stdout, "0.1.0.dev0",
+            stdout, "0.1.0",
             f"Expected version string from mcp._version, got: {stdout!r}\n"
             f"stderr: {err.getvalue()}",
         )
