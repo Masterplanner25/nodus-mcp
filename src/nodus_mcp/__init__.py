@@ -55,6 +55,7 @@ from .stdio import StdioTransport
 from .http import HttpTransport
 from .client import McpClient
 from .server import McpServer
+from .server_transport import StdioServerTransport, HttpServerTransport
 
 __all__ = [
     "__version__",
@@ -102,6 +103,9 @@ __all__ = [
     # Client + Server
     "McpClient",
     "McpServer",
+    # Server transports (Phase M)
+    "StdioServerTransport",
+    "HttpServerTransport",
     # Resources (Phase D)
     "METHOD_RESOURCES_LIST",
     "METHOD_RESOURCES_READ",
