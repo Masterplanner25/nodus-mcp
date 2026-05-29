@@ -34,6 +34,19 @@
 **Description:** `ElicitationRequest` sentinel only works for Python callable handlers. Nodus closure handlers cannot issue server-side elicitation in v0.1. Requires `tool.elicit()` builtin (new std:tool function, no new opcode).  
 **Doc:** `docs/design/04-server-mode.md §C2`.
 
+## TD-007: Server-initiated requests over HTTP deferred to v0.2
+
+**Status:** Deferred to v0.2, known v0.1 asymmetry.  
+**Description:** F's server-initiated request paths (roots/list, sampling/createMessage,
+elicitation/create) require a persistent channel the server can write into. HTTP in v0.1
+is stateless request/response (.post() only); there is no open channel for the server to
+push a request to the client. Therefore: (a) roots/sampling capabilities are suppressed
+in HTTP clients' outbound _meta even when handlers are configured, (b) inbound request
+routing (_inbound_request_handler) is not wired on HttpTransport. Handlers configured on
+a McpClient remain functional for stdio connections — the limitation is transport-level,
+not config-level. v0.2 path: SSE or long-poll transport enabling bidirectional HTTP.  
+**Doc:** `docs/design/03-transports.md §C3` (no SSE in v0.1).
+
 ## TD-006: resources/subscribe not implemented
 
 **Status:** Deferred to v0.2.  

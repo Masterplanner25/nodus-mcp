@@ -371,19 +371,28 @@ class McpClient:
 
     # ── Capability gating (doc 5 C3, doc 4 D2 client mirror) ─────────────────
 
-    def _build_meta(self) -> RequestMeta:
+    def _build_meta(self, suppress_server_initiated: bool = False) -> RequestMeta:
         """Build the current outbound _meta reflecting configured capabilities.
 
-        roots and sampling are only advertised when configured (doc 5 C3):
-          - roots: present if any connection has roots configured
-          - sampling: present if a sampling handler is registered
-        tools and elicitation are always advertised.
+        roots and sampling are only advertised when (doc 5 C3):
+          - configured (handler set / roots provided), AND
+          - the connection can actually service inbound requests.
+
+        suppress_server_initiated=True for HTTP connections (TD-007): HTTP is
+        stateless; the server cannot send roots/sampling requests to the client,
+        so advertising those capabilities would be a lie. Even if a handler is
+        configured, HTTP connections must not claim those capabilities.
+
+        tools and elicitation are always advertised (elicitation here means the
+        MRTR path in tools/call responses — which works over HTTP since it is
+        response-folded, not server-initiated).
         """
         caps: dict = {"tools": {}, "elicitation": {}}
-        if any(conn.roots for conn in self._connections.values()):
-            caps["roots"] = {}
-        if self._sampling_handler is not None:
-            caps["sampling"] = {}
+        if not suppress_server_initiated:
+            if any(conn.roots for conn in self._connections.values()):
+                caps["roots"] = {}
+            if self._sampling_handler is not None:
+                caps["sampling"] = {}
         return RequestMeta(capabilities=caps, client_info=_CLIENT_INFO)
 
     # ── Handler registration (Phase C + F) ───────────────────────────────────
@@ -422,24 +431,35 @@ class McpClient:
         """Discover server tools and (optionally) register them in a NodusRuntime.
 
         Steps (doc 3 D1):
-          1. Send server/discover (with capability-gated _meta) to learn tools.
-          2. For each tool: create a handler closure (alias stripped — doc 1 B1).
-          3. If runtime provided: register each tool as mcp.<alias>.<name>.
-          4. Wire the transport's inbound-request handler (Phase F routing).
-          5. Return McpConnection handle.
+          1. Detect transport type (HTTP vs stdio) for capability suppression (TD-007).
+          2. Send server/discover (with capability-gated _meta) to learn tools.
+          3. For each tool: create a handler closure (alias stripped — doc 1 B1).
+          4. If runtime provided: register each tool as mcp.<alias>.<name>.
+          5. Wire the transport's inbound-request handler (stdio only — TD-007).
+          6. Return McpConnection handle.
 
         roots: list of {uri, name} dicts; if provided, advertise roots capability
         and auto-respond to roots/list inbound requests (Phase F1, doc 5 A2).
+        HTTP connections suppress roots/sampling in _meta regardless (TD-007).
         runtime: NodusRuntime instance. If None, tools are discovered but not
         registered (useful for unit tests).
         """
-        # Build meta for discover; temporarily include roots cap if provided now
-        disc_caps: dict = {"tools": {}, "elicitation": {}}
-        if roots:
-            disc_caps["roots"] = {}
-        if self._sampling_handler is not None:
-            disc_caps["sampling"] = {}
-        disc_meta = RequestMeta(capabilities=disc_caps, client_info=_CLIENT_INFO)
+        from .http import HttpTransport as _HttpTransport
+        is_http = isinstance(transport, _HttpTransport)
+
+        # Build meta for discover — suppress server-initiated caps for HTTP (TD-007)
+        if is_http:
+            disc_meta = RequestMeta(
+                capabilities={"tools": {}, "elicitation": {}},
+                client_info=_CLIENT_INFO,
+            )
+        else:
+            disc_caps: dict = {"tools": {}, "elicitation": {}}
+            if roots:
+                disc_caps["roots"] = {}
+            if self._sampling_handler is not None:
+                disc_caps["sampling"] = {}
+            disc_meta = RequestMeta(capabilities=disc_caps, client_info=_CLIENT_INFO)
 
         discover_resp = transport.send_request(
             METHOD_SERVER_DISCOVER,
@@ -472,6 +492,8 @@ class McpClient:
                 (tool_raw.get("annotations") or {}).get("deprecated", False)
             )
 
+            # get_meta uses suppress_server_initiated for HTTP (TD-007)
+            _suppress = is_http
             tool_handler = _make_tool_handler(
                 raw_name=raw_name,
                 transport=transport,
@@ -479,7 +501,7 @@ class McpClient:
                 elicitation_registry=self._registry,
                 elicitation_timeout_s=self._elicitation_timeout_s,
                 max_elicitation_rounds=self._max_elicitation_rounds,
-                get_meta=self._build_meta,
+                get_meta=lambda _s=_suppress: self._build_meta(_s),
             )
 
             namespaced_name = f"mcp.{alias}.{raw_name}"
@@ -502,12 +524,13 @@ class McpClient:
             server_capabilities=server_caps,
             registered_tools=registered_tools,
             roots=list(roots) if roots else [],
+            stateless_http=is_http,
         )
         self._connections[alias] = conn
 
-        # Wire Phase F inbound-request routing onto the transport (F1+F2+F3).
-        # StdioTransport exposes _inbound_request_handler; other transports may not.
-        if hasattr(transport, "_inbound_request_handler"):
+        # Wire Phase F inbound-request routing onto the transport (stdio only).
+        # HTTP has no persistent channel for server-initiated requests (TD-007).
+        if not is_http and hasattr(transport, "_inbound_request_handler"):
             transport._inbound_request_handler = self._build_inbound_handler(conn)
 
         return conn
@@ -519,7 +542,7 @@ class McpClient:
         conn = self._get_connection(alias)
         return _simple_call(
             conn.transport, METHOD_RESOURCES_LIST,
-            {"_meta": self._build_meta().to_dict()},
+            {"_meta": self._build_meta(conn.stateless_http).to_dict()},
         )
 
     def resources_read(self, alias: str, uri: str) -> dict:
@@ -527,7 +550,7 @@ class McpClient:
         conn = self._get_connection(alias)
         return _simple_call(
             conn.transport, METHOD_RESOURCES_READ,
-            {"uri": uri, "_meta": self._build_meta().to_dict()},
+            {"uri": uri, "_meta": self._build_meta(conn.stateless_http).to_dict()},
         )
 
     # ── Phase E: prompts ─────────────────────────────────────────────────────
@@ -537,13 +560,13 @@ class McpClient:
         conn = self._get_connection(alias)
         return _simple_call(
             conn.transport, METHOD_PROMPTS_LIST,
-            {"_meta": self._build_meta().to_dict()},
+            {"_meta": self._build_meta(conn.stateless_http).to_dict()},
         )
 
     def prompts_get(self, alias: str, name: str, arguments: dict | None = None) -> dict:
         """Fetch a rendered prompt by name (prompts/get)."""
         conn = self._get_connection(alias)
-        params: dict = {"name": name, "_meta": self._build_meta().to_dict()}
+        params: dict = {"name": name, "_meta": self._build_meta(conn.stateless_http).to_dict()}
         if arguments:
             params["arguments"] = arguments
         return _simple_call(conn.transport, METHOD_PROMPTS_GET, params)

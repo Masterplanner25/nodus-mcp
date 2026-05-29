@@ -40,6 +40,7 @@ class McpConnection:
     server_capabilities: dict
     registered_tools: list[str] = field(default_factory=list)
     roots: list = field(default_factory=list)  # [{uri, name}] configured at connect time (doc 5 A2)
+    stateless_http: bool = False  # True for HttpTransport; suppresses server-initiated caps (TD-007)
 
     def close(self) -> None:
         """Close the underlying transport (doc 3 D3).
