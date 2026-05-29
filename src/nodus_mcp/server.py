@@ -13,6 +13,8 @@ Statelessness discipline (the core invariant this file enforces):
 
 Phase H: dispatch core + server/discover + tools/list (read-only, no invoke)
 Phase I: tools/call → registry.invoke() + producer-side error table (doc 4 B1/B2)
+Phase J: server resources (list + read, handler-configured, no language-side registry)
+Phase K: server prompts (list + get, handler-configured, required-arg validation)
 Phase J/K: server resources + prompts
 Phase L: server-issued elicitation/sampling (doc 4 C1 re-call pattern)
 Phase M: concrete transports (StdioServerTransport, HttpServerTransport)
@@ -37,12 +39,20 @@ from .protocol.messages import (
     METHOD_SERVER_DISCOVER,
     METHOD_TOOLS_LIST,
     METHOD_TOOLS_CALL,
+    METHOD_RESOURCES_LIST,
+    METHOD_RESOURCES_READ,
+    METHOD_PROMPTS_LIST,
+    METHOD_PROMPTS_GET,
     ToolDefinition,
     ToolCallResult,
     ToolErrorCategory,
     ElicitationRequest,
     SamplingRequest,
     RootsRequest,
+    ResourceDescriptor,
+    ResourceContent,
+    PromptDescriptor,
+    PromptMessage,
 )
 
 
@@ -78,10 +88,18 @@ class McpServer:
 
     def __init__(self, runtime: Any = None) -> None:
         # Configuration — set once, not mutated per-request.
-        self._runtime = runtime          # duck-typed runtime; only .tool_registry.list_tools() used in H
+        self._runtime = runtime          # duck-typed runtime; only .tool_registry.* used
         self._elicitation_handler = None  # Phase L: set to advertise elicitation capability
         self._sampling_handler = None     # Phase L
         self._roots: list = []            # Phase L: server's own roots (for roots/list responses)
+
+        # Phase J: resource handlers (handler-configured; no language-side registry)
+        self._resource_list_handler = None  # fn() → list[dict]   — enumerate resources
+        self._resource_read_handler = None  # fn(uri) → list[dict] — read resource contents
+
+        # Phase K: prompt handlers (handler-configured; no language-side registry)
+        self._prompt_list_handler = None    # fn() → list[dict]             — enumerate prompts
+        self._prompt_get_handler = None     # fn(name, args) → dict         — get rendered prompt
 
         self._codec = McpCodec()
 
@@ -98,6 +116,39 @@ class McpServer:
     def set_roots(self, roots: list) -> None:
         """Configure the server's roots list — gates roots capability advertisement."""
         self._roots = list(roots)
+
+    def set_resource_list_handler(self, fn) -> None:
+        """Register the resources/list handler (Phase J).
+        fn() → list[dict]  — each dict is a resource descriptor:
+            {uri, name, mimeType?, description?}
+        Gates 'resources' in server capabilities. If absent → resources/list returns -32601.
+        """
+        self._resource_list_handler = fn
+
+    def set_resource_read_handler(self, fn) -> None:
+        """Register the resources/read handler (Phase J).
+        fn(uri: str) → list[dict]  — each dict is resource content:
+            {uri, text?} or {uri, blob?}  (exactly one of text or blob per item)
+        Raise KeyError for unknown uri (→ -32601). Raise for other errors (→ -32603).
+        """
+        self._resource_read_handler = fn
+
+    def set_prompt_list_handler(self, fn) -> None:
+        """Register the prompts/list handler (Phase K).
+        fn() → list[dict]  — each dict is a prompt descriptor:
+            {name, description?, arguments?: [{name, description?, required?}]}
+        Gates 'prompts' in server capabilities. If absent → prompts/list returns -32601.
+        Used to validate required arguments in prompts/get.
+        """
+        self._prompt_list_handler = fn
+
+    def set_prompt_get_handler(self, fn) -> None:
+        """Register the prompts/get handler (Phase K).
+        fn(name: str, arguments: dict) → dict  — rendered prompt:
+            {description?, messages: [{role, content: {type, ...}}]}
+        Raise KeyError for unknown prompt name (→ -32601).
+        """
+        self._prompt_get_handler = fn
 
     # ── Primary dispatch method ────────────────────────────────────────────────
 
@@ -133,7 +184,14 @@ class McpServer:
             return self._handle_tools_list(params)
         if method == METHOD_TOOLS_CALL:          # Phase I
             return self._handle_tools_call(params)
-        # resources/*, prompts/* are added by J, K respectively.
+        if method == METHOD_RESOURCES_LIST:      # Phase J
+            return self._handle_resources_list(params)
+        if method == METHOD_RESOURCES_READ:      # Phase J
+            return self._handle_resources_read(params)
+        if method == METHOD_PROMPTS_LIST:        # Phase K
+            return self._handle_prompts_list(params)
+        if method == METHOD_PROMPTS_GET:         # Phase K
+            return self._handle_prompts_get(params)
         raise _MethodNotFoundError(method)
 
     # ── H2: server/discover ─────────────────────────────────────────────────────
@@ -160,6 +218,10 @@ class McpServer:
             caps["roots"] = {}
         if self._sampling_handler is not None:
             caps["sampling"] = {}
+        if self._resource_list_handler is not None:
+            caps["resources"] = {}
+        if self._prompt_list_handler is not None:
+            caps["prompts"] = {}
 
         return {
             "serverInfo": _SERVER_INFO,
@@ -271,6 +333,116 @@ class McpServer:
 
         # I2.e: Success
         return ToolCallResult.from_python_value(result).to_dict()
+
+
+    # ── Phase J: server resources ─────────────────────────────────────────────────
+
+    def _handle_resources_list(self, params: dict) -> dict:
+        """Handle resources/list (Phase J).
+
+        Calls the configured list handler; emits RC-shaped ResourceDescriptor dicts.
+        No handler → -32601 (unsupported, not configured).
+        Reuses ResourceDescriptor from Phase D — same RC shape, server emits/client parses.
+        No resources/subscribe (TD-006: server-push deferred to v0.2).
+        """
+        fn = self._resource_list_handler
+        if fn is None:
+            raise _MethodNotFoundError("resources/list is not configured")
+        try:
+            raw = fn() or []
+        except Exception as exc:
+            raise Exception(f"Resource list handler failed: {exc}")
+        return {"resources": [ResourceDescriptor.from_dict(r).to_dict() for r in raw]}
+
+    def _handle_resources_read(self, params: dict) -> dict:
+        """Handle resources/read (Phase J).
+
+        Validates uri param → calls read handler → emits ResourceContent dicts.
+        Handler raises KeyError for unknown uri → -32601.
+        text/blob invariant (exactly one per content item) enforced by ResourceContent.
+        """
+        uri = params.get("uri")
+        if not isinstance(uri, str) or not uri:
+            raise _InvalidParamsError("resources/read requires a non-empty string 'uri'")
+        fn = self._resource_read_handler
+        if fn is None:
+            raise _MethodNotFoundError("resources/read is not configured")
+        try:
+            raw = fn(uri) or []
+        except KeyError:
+            raise _MethodNotFoundError(f"Resource '{uri}' not found")
+        except Exception as exc:
+            raise Exception(f"Resource read handler failed: {exc}")
+        return {"contents": [ResourceContent.from_dict(c).to_dict() for c in raw]}
+
+    # ── Phase K: server prompts ───────────────────────────────────────────────────
+
+    def _handle_prompts_list(self, params: dict) -> dict:
+        """Handle prompts/list (Phase K).
+
+        Calls the configured list handler; emits RC-shaped PromptDescriptor dicts.
+        Reuses PromptDescriptor/PromptArgument from Phase E — same RC shape.
+        """
+        fn = self._prompt_list_handler
+        if fn is None:
+            raise _MethodNotFoundError("prompts/list is not configured")
+        try:
+            raw = fn() or []
+        except Exception as exc:
+            raise Exception(f"Prompt list handler failed: {exc}")
+        return {"prompts": [PromptDescriptor.from_dict(p).to_dict() for p in raw]}
+
+    def _handle_prompts_get(self, params: dict) -> dict:
+        """Handle prompts/get (Phase K).
+
+        Validates name param → checks required arguments (using list handler if available,
+        mirror of E's argument schema) → calls get handler → emits messages.
+        Missing required argument → -32602 (K-specific validation, lighter than I's full schema).
+        Handler raises KeyError for unknown prompt name → -32601.
+        """
+        name = params.get("name")
+        if not isinstance(name, str) or not name:
+            raise _InvalidParamsError("prompts/get requires a non-empty string 'name'")
+
+        fn = self._prompt_get_handler
+        if fn is None:
+            raise _MethodNotFoundError("prompts/get is not configured")
+
+        arguments: dict = params.get("arguments") or {}
+
+        # K-specific validation: check required arguments against prompt definition.
+        # Uses the list handler as the authoritative source of required-arg metadata.
+        if self._prompt_list_handler is not None:
+            try:
+                prompts_raw = self._prompt_list_handler() or []
+            except Exception:
+                prompts_raw = []
+            for p in prompts_raw:
+                if p.get("name") == name:
+                    pd = PromptDescriptor.from_dict(p)
+                    for arg in pd.arguments:
+                        if arg.required and arg.name not in arguments:
+                            raise _InvalidParamsError(
+                                f"Prompt '{name}': missing required argument '{arg.name}'"
+                            )
+                    break
+
+        try:
+            raw = fn(name, arguments)
+        except KeyError:
+            raise _MethodNotFoundError(f"Prompt '{name}' not found")
+        except Exception as exc:
+            raise Exception(f"Prompt get handler failed: {exc}")
+
+        messages = []
+        for msg in (raw.get("messages") or []):
+            pm = PromptMessage.from_dict(msg)
+            messages.append({"role": pm.role, "content": pm.content.to_dict()})
+
+        result: dict = {"messages": messages}
+        if raw.get("description"):
+            result["description"] = raw["description"]
+        return result
 
 
 # ── Phase I helpers: arg validation (inlined; no nodus-lang internal import) ───
