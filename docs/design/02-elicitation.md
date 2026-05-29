@@ -307,15 +307,56 @@ The timeout value is resolved in priority order:
 2. Per-client construction: `McpClient(elicitation_timeout_s=120)`
 3. Default: `300` (5 minutes, Decision 14)
 
-**The gap flagged in the Phase 1 handoff:** `run_source()` timeout and the
-elicitation timeout are separate mechanisms that do not interfere. If
-`run_source()` is called with a timeout shorter than the elicitation timeout,
-the `run_source()` timeout fires first (via the scheduler's timer heap),
-the VM is interrupted, and the Python handler's `threading.Event.wait` is
-orphaned in a background thread. To prevent this: the adapter validates at
-`McpClient` construction time that `elicitation_timeout_s < run_source_timeout_s`
-if both are configured. On mismatch, it logs a warning. The orphaned thread
-will time out naturally via its own `threading.Event` expiry.
+**GAP-ELICIT-TIMEOUT-STATIC (mitigated):** If `elicitation_timeout_s ≥
+run_source_timeout_ms / 1000` a single elicitation wait can outlive the
+outer `run_source()` budget. The adapter validates this at construction
+and logs a warning. Mitigated by the static check.
+
+**GAP-ELICIT-TIMEOUT-CUMULATIVE (open, v0.1 known-gap):** Even with
+`elicitation_timeout_s < run_source_timeout_ms / 1000`, multiple tool calls
+in one `run_source()` burn the outer budget cumulatively. A late elicitation
+starts its full wait with little remaining budget. The outer `run_source()`
+timer fires via the scheduler's timer heap — but the VM thread is parked
+inside `threading.Event.wait()` and cannot be preempted by the scheduler.
+This relationship between elapsed outer time and remaining elicitation budget
+is a runtime condition, undetectable at construction.
+
+**v0.1 resolution: teardown sentinel.** Rather than leaving a parked thread
+to drain on its own (undefined write-back state), `run_source()` teardown
+signals every active elicitation `threading.Event` with a `TEARDOWN_SENTINEL`
+value. The parked handler wakes immediately, reads the sentinel, and returns
+`tool_error / category: "elicitation_aborted"` — a clean error, not a leak:
+
+```python
+# Handler (simplified):
+result_box = [None]
+wake_event = threading.Event()
+token = runtime._register_active_elicitation(result_box, wake_event)
+try:
+    fired = wake_event.wait(timeout=T)
+    if not fired:
+        return tool_error("elicitation_timeout", ...)
+    if result_box[0] is TEARDOWN_SENTINEL:
+        return tool_error("elicitation_aborted",
+                          "run_source teardown interrupted elicitation")
+    # real response is in result_box[0]
+finally:
+    runtime._unregister_active_elicitation(token)
+
+# run_source teardown:
+for box, event in runtime._active_elicitations:
+    box[0] = TEARDOWN_SENTINEL
+    event.set()
+```
+
+This is the same primitive as D2's timeout sentinel — `event.set()` + a
+typed value in a result box — triggered by outer teardown instead of by the
+inner timer. The cumulative gap shrinks from "orphaned thread, undefined
+state" to "elicitation cut short by outer teardown, clean `elicitation_aborted`
+returned." The Nodus script still receives a `tool_error`; which elicitation
+gets cut short is non-deterministic wall-clock. That residual is documented
+and not fixed in v0.1. `03-transports.md` D3 references this mechanism for
+the transport-side shutdown path.
 
 For the aspirational Nodus-closure path: the timeout would be a timer entry
 in the scheduler's `timers` heap. On fire, a sentinel value would be appended
@@ -488,6 +529,9 @@ instruction does not touch bytecode.
 | Callback call site | VM thread, synchronous, blocking |
 | No-handler check | At first `InputRequiredResult`, not at discovery |
 | Timeout attachment | `threading.Event.wait(T)` in handler; T = per-call → per-client → 300s |
+| GAP-ELICIT-TIMEOUT-STATIC | Mitigated: construction-time warning if `elicitation_timeout_s ≥ run_source_timeout` |
+| GAP-ELICIT-TIMEOUT-CUMULATIVE | Open v0.1 known-gap: cumulative burn undetectable at construction; teardown sentinel provides clean abort |
+| Teardown sentinel mechanism | `runtime._active_elicitations` registry; teardown sets `TEARDOWN_SENTINEL` + `event.set()` |
 | Channel cleanup on timeout | N/A for v0.1 (no channel); sentinel push for `_io_channels` path |
 | Test happy path | Mock transport + stub callback; no `flush_async` needed |
 | Test timeout path | Short `elicitation_timeout_s` + blocking stub; `advance_clock` for future `_io_channels` path |
