@@ -5,6 +5,8 @@ RC constraints enforced here:
 - Capabilities live in _meta per-request, not in a session (doc 1 C1).
 - requestState is opaque bytes/str at this layer — never parsed (doc 1 A1, doc 2 B2).
 - server/discover replaces session-init capability exchange (doc 1 C2).
+- resources/subscribe is deferred to v0.2 (requires server-push / SSE; doc 3 C3
+  dropped SSE; TD-006 in TECH_DEBT.md).
 """
 from __future__ import annotations
 
@@ -20,6 +22,15 @@ METHOD_TOOLS_LIST = "tools/list"
 METHOD_SERVER_DISCOVER = "server/discover"
 METHOD_ROOTS_LIST = "roots/list"
 METHOD_SAMPLING_CREATE_MESSAGE = "sampling/createMessage"
+
+# Phase D — resources (RC field names: uri, name, mimeType, description, blob)
+METHOD_RESOURCES_LIST = "resources/list"
+METHOD_RESOURCES_READ = "resources/read"
+# resources/subscribe intentionally absent — deferred to v0.2 (TD-006)
+
+# Phase E — prompts
+METHOD_PROMPTS_LIST = "prompts/list"
+METHOD_PROMPTS_GET = "prompts/get"
 
 # ── Result type discriminators ────────────────────────────────────────────────
 
@@ -265,3 +276,163 @@ class RootsRequest:
     Reuses doc 4 C1 re-call pattern; RootsRequest is the sentinel type.
     """
     state: dict = field(default_factory=dict)
+
+
+# ── Phase D: resource types (RC shapes) ──────────────────────────────────────
+# RC field names for resources: uri, name, mimeType (camelCase), description.
+# RC field names for contents: uri, text (text resource), blob (base64 binary).
+# No pre-RC `id` field; no pre-RC `metadata` wrapper.
+
+@dataclass
+class ResourceDescriptor:
+    """One entry from resources/list (RC shape: uri, name, mimeType?, description?)."""
+    uri: str
+    name: str
+    mime_type: str | None = None   # RC wire name: mimeType
+    description: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ResourceDescriptor:
+        return cls(
+            uri=d["uri"],
+            name=d.get("name", d["uri"]),
+            mime_type=d.get("mimeType"),
+            description=d.get("description"),
+        )
+
+    def to_dict(self) -> dict:
+        out: dict = {"uri": self.uri, "name": self.name}
+        if self.mime_type is not None:
+            out["mimeType"] = self.mime_type
+        if self.description is not None:
+            out["description"] = self.description
+        return out
+
+
+@dataclass
+class ResourceContent:
+    """One content item from resources/read.
+
+    Exactly one of text or blob is set (RC invariant).
+    blob is a base64-encoded string; the adapter passes it through opaquely
+    (decoding is the host application's responsibility).
+    """
+    uri: str
+    text: str | None = None   # text resource
+    blob: str | None = None   # base64 binary resource
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ResourceContent:
+        return cls(uri=d["uri"], text=d.get("text"), blob=d.get("blob"))
+
+    def is_text(self) -> bool:
+        return self.text is not None
+
+    def is_blob(self) -> bool:
+        return self.blob is not None
+
+    def to_dict(self) -> dict:
+        out: dict = {"uri": self.uri}
+        if self.text is not None:
+            out["text"] = self.text
+        if self.blob is not None:
+            out["blob"] = self.blob
+        return out
+
+
+# ── Phase E: prompt types (RC shapes) ────────────────────────────────────────
+# RC prompt message content types: text, image, resource.
+# No pre-RC `file` type; no pre-RC `metadata` on arguments.
+
+@dataclass
+class PromptArgument:
+    """One argument descriptor from a prompt's arguments list."""
+    name: str
+    description: str | None = None
+    required: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict) -> PromptArgument:
+        return cls(
+            name=d["name"],
+            description=d.get("description"),
+            required=bool(d.get("required", False)),
+        )
+
+    def to_dict(self) -> dict:
+        out: dict = {"name": self.name}
+        if self.description is not None:
+            out["description"] = self.description
+        if self.required:
+            out["required"] = True
+        return out
+
+
+@dataclass
+class PromptDescriptor:
+    """One entry from prompts/list (RC shape: name, description?, arguments?)."""
+    name: str
+    description: str | None = None
+    arguments: list[PromptArgument] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> PromptDescriptor:
+        return cls(
+            name=d["name"],
+            description=d.get("description"),
+            arguments=[PromptArgument.from_dict(a) for a in d.get("arguments") or []],
+        )
+
+    def to_dict(self) -> dict:
+        out: dict = {"name": self.name}
+        if self.description is not None:
+            out["description"] = self.description
+        if self.arguments:
+            out["arguments"] = [a.to_dict() for a in self.arguments]
+        return out
+
+
+@dataclass
+class PromptMessageContent:
+    """MCP content block in a prompt message (RC types: text, image, resource)."""
+    type: str                     # "text" | "image" | "resource"
+    text: str | None = None       # type=text
+    data: str | None = None       # type=image — base64
+    mime_type: str | None = None  # type=image — RC wire name: mimeType
+    resource: dict | None = None  # type=resource — {uri, text?|blob?}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> PromptMessageContent:
+        return cls(
+            type=d.get("type", "text"),
+            text=d.get("text"),
+            data=d.get("data"),
+            mime_type=d.get("mimeType"),
+            resource=d.get("resource"),
+        )
+
+    def to_dict(self) -> dict:
+        out: dict = {"type": self.type}
+        if self.text is not None:
+            out["text"] = self.text
+        if self.data is not None:
+            out["data"] = self.data
+        if self.mime_type is not None:
+            out["mimeType"] = self.mime_type
+        if self.resource is not None:
+            out["resource"] = self.resource
+        return out
+
+
+@dataclass
+class PromptMessage:
+    """One message from prompts/get (RC shape: role + content block)."""
+    role: str   # "user" | "assistant"
+    content: PromptMessageContent
+
+    @classmethod
+    def from_dict(cls, d: dict) -> PromptMessage:
+        return cls(
+            role=d["role"],
+            content=PromptMessageContent.from_dict(d["content"]),
+        )

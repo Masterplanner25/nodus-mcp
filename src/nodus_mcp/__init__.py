@@ -35,6 +35,18 @@ from .protocol import (
     ElicitationRequest,
     SamplingRequest,
     RootsRequest,
+    # Phase D — resource types
+    METHOD_RESOURCES_LIST,
+    METHOD_RESOURCES_READ,
+    ResourceDescriptor,
+    ResourceContent,
+    # Phase E — prompt types
+    METHOD_PROMPTS_LIST,
+    METHOD_PROMPTS_GET,
+    PromptArgument,
+    PromptDescriptor,
+    PromptMessageContent,
+    PromptMessage,
 )
 from .codec import McpCodec
 from .transport import McpTransport, McpServerTransport, TransportError
@@ -86,4 +98,16 @@ __all__ = [
     "StdioTransport",
     # Client
     "McpClient",
+    # Resources (Phase D)
+    "METHOD_RESOURCES_LIST",
+    "METHOD_RESOURCES_READ",
+    "ResourceDescriptor",
+    "ResourceContent",
+    # Prompts (Phase E)
+    "METHOD_PROMPTS_LIST",
+    "METHOD_PROMPTS_GET",
+    "PromptArgument",
+    "PromptDescriptor",
+    "PromptMessageContent",
+    "PromptMessage",
 ]

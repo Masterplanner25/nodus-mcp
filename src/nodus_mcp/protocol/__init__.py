@@ -18,6 +18,10 @@ from .messages import (
     METHOD_SERVER_DISCOVER,
     METHOD_ROOTS_LIST,
     METHOD_SAMPLING_CREATE_MESSAGE,
+    METHOD_RESOURCES_LIST,
+    METHOD_RESOURCES_READ,
+    METHOD_PROMPTS_LIST,
+    METHOD_PROMPTS_GET,
     RESULT_TYPE_SUCCESS,
     RESULT_TYPE_INPUT_REQUIRED,
     RESULT_TYPE_SAMPLING_REQUIRED,
@@ -33,6 +37,12 @@ from .messages import (
     ElicitationRequest,
     SamplingRequest,
     RootsRequest,
+    ResourceDescriptor,
+    ResourceContent,
+    PromptArgument,
+    PromptDescriptor,
+    PromptMessageContent,
+    PromptMessage,
 )
 
 __all__ = [
@@ -67,4 +77,14 @@ __all__ = [
     "ElicitationRequest",
     "SamplingRequest",
     "RootsRequest",
+    "METHOD_RESOURCES_LIST",
+    "METHOD_RESOURCES_READ",
+    "METHOD_PROMPTS_LIST",
+    "METHOD_PROMPTS_GET",
+    "ResourceDescriptor",
+    "ResourceContent",
+    "PromptArgument",
+    "PromptDescriptor",
+    "PromptMessageContent",
+    "PromptMessage",
 ]

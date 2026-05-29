@@ -33,3 +33,9 @@
 **Status:** v0.2 target.  
 **Description:** `ElicitationRequest` sentinel only works for Python callable handlers. Nodus closure handlers cannot issue server-side elicitation in v0.1. Requires `tool.elicit()` builtin (new std:tool function, no new opcode).  
 **Doc:** `docs/design/04-server-mode.md §C2`.
+
+## TD-006: resources/subscribe not implemented
+
+**Status:** Deferred to v0.2.  
+**Description:** `resources/subscribe` (server-push resource update notifications) requires a held-stream model. v0.1 dropped SSE (doc 3 C3); server-push notifications are not supported. The subscription flow needs either a persistent notification channel or an SSE stream, neither of which exists in v0.1's stateless HTTP or stdio model (which only reads responses to explicit requests).  
+**Doc:** `docs/design/03-transports.md §C3`.

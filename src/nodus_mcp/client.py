@@ -1,14 +1,18 @@
-"""McpClient — client-role tool calls and MRTR elicitation loop (Phase C).
+"""McpClient — client-role tool calls, resources, prompts, and MRTR loop.
 
 Implements:
-  - tools/call request/response cycle with alias stripping (doc 1 B1)
-  - MRTR elicitation state machine with five distinct terminal conditions (doc 2)
+  - tools/call + MRTR elicitation (Phase C)
+  - resources/list + resources/read (Phase D)
+  - prompts/list + prompts/get (Phase E)
   - server/discover for tool registration (doc 3 D1, doc 4 D2)
   - McpClient class for per-client config + connection management
 
 requestState is opaque to the client throughout this file.
 The client receives it as a str and echoes it back unchanged (doc 2 B2).
 It is NEVER decoded here. Decode lives in Phase H (server role).
+
+D and E reuse _simple_call — the same transport.send_request path as Phase C,
+no parallel call mechanism (doc 3 A1 thin-shared-core discipline).
 """
 from __future__ import annotations
 
@@ -23,6 +27,10 @@ from .protocol.jsonrpc import METHOD_NOT_FOUND, INVALID_PARAMS
 from .protocol.messages import (
     METHOD_TOOLS_CALL,
     METHOD_SERVER_DISCOVER,
+    METHOD_RESOURCES_LIST,
+    METHOD_RESOURCES_READ,
+    METHOD_PROMPTS_LIST,
+    METHOD_PROMPTS_GET,
     RESULT_TYPE_INPUT_REQUIRED,
     RequestMeta,
     ToolCallResult,
@@ -44,6 +52,38 @@ _CLIENT_META = RequestMeta(
     capabilities={"tools": {}, "elicitation": {}, "roots": {}, "sampling": {}},
     client_info={"name": "nodus-mcp", "version": "0.1.0"},
 )
+
+
+# ── Shared call path (D + E reuse this; C's MRTR loop inlines the same logic) ─
+
+def _simple_call(transport: McpTransport, method: str, params: dict) -> dict:
+    """Send one request and return the result dict (or an error dict).
+
+    This is the shared call path for resources and prompts (Phases D and E).
+    D and E do not introduce a second send mechanism — they call transport
+    .send_request through here, same codec, same error mapping (doc 1 D-table).
+
+    Returns a plain dict: either the server's result body, or a
+    ToolCallResult.error(...).to_dict() on failure.
+    """
+    try:
+        response = transport.send_request(method, params)
+    except TransportError as exc:
+        return ToolCallResult.error(ToolErrorCategory.TRANSPORT_ERROR, str(exc)).to_dict()
+
+    if "error" in response:
+        err = response["error"]
+        code = err.get("code")
+        msg = err.get("message", "RPC error")
+        if code == METHOD_NOT_FOUND:
+            cat = ToolErrorCategory.NOT_FOUND
+        elif code == INVALID_PARAMS:
+            cat = ToolErrorCategory.INVALID_PARAMS
+        else:
+            cat = ToolErrorCategory.TRANSPORT_ERROR
+        return ToolCallResult.error(cat, msg).to_dict()
+
+    return response.get("result") or {}
 
 
 # ── Elicitation callback invocation ──────────────────────────────────────────
@@ -412,6 +452,76 @@ class McpClient:
             registered_tools=registered_tools,
         )
         self._connections[alias] = conn
+        return conn
+
+    # ── Phase D: resources ───────────────────────────────────────────────────
+
+    def resources_list(self, alias: str) -> dict:
+        """Fetch the server's resource list (resources/list).
+
+        Returns the raw result dict: {resources: [{uri, name, mimeType?, description?}]}
+        or a ToolCallResult.error dict on failure.
+        Use ResourceDescriptor.from_dict(r) to parse individual entries.
+        """
+        conn = self._get_connection(alias)
+        return _simple_call(
+            conn.transport,
+            METHOD_RESOURCES_LIST,
+            {"_meta": _CLIENT_META.to_dict()},
+        )
+
+    def resources_read(self, alias: str, uri: str) -> dict:
+        """Read one resource by URI (resources/read).
+
+        Returns {contents: [{uri, text?}|{uri, blob?}]} or an error dict.
+        blob values are base64 strings; decoding is the host's responsibility.
+        Use ResourceContent.from_dict(c) to parse individual content items.
+        """
+        conn = self._get_connection(alias)
+        return _simple_call(
+            conn.transport,
+            METHOD_RESOURCES_READ,
+            {"uri": uri, "_meta": _CLIENT_META.to_dict()},
+        )
+
+    # ── Phase E: prompts ─────────────────────────────────────────────────────
+
+    def prompts_list(self, alias: str) -> dict:
+        """Fetch the server's prompt list (prompts/list).
+
+        Returns {prompts: [{name, description?, arguments?}]} or an error dict.
+        Use PromptDescriptor.from_dict(p) to parse individual entries.
+        """
+        conn = self._get_connection(alias)
+        return _simple_call(
+            conn.transport,
+            METHOD_PROMPTS_LIST,
+            {"_meta": _CLIENT_META.to_dict()},
+        )
+
+    def prompts_get(
+        self,
+        alias: str,
+        name: str,
+        arguments: dict | None = None,
+    ) -> dict:
+        """Fetch a rendered prompt by name (prompts/get).
+
+        Returns {description?, messages: [{role, content}]} or an error dict.
+        Use PromptMessage.from_dict(m) to parse individual messages.
+        """
+        conn = self._get_connection(alias)
+        params: dict = {"name": name, "_meta": _CLIENT_META.to_dict()}
+        if arguments:
+            params["arguments"] = arguments
+        return _simple_call(conn.transport, METHOD_PROMPTS_GET, params)
+
+    # ── Internal helpers ─────────────────────────────────────────────────────
+
+    def _get_connection(self, alias: str) -> McpConnection:
+        conn = self._connections.get(alias)
+        if conn is None:
+            raise KeyError(f"no connection with alias '{alias}'")
         return conn
 
     def disconnect(self, alias: str, runtime=None) -> None:
