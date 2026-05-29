@@ -124,18 +124,6 @@ def test_h_discover_not_required_before_tools_list():
 
 # ── H scope: tools/call is NOT in H ──────────────────────────────────────────
 
-def test_h_tools_call_not_routed():
-    """H scope: tools/call returns -32601 from H's router.
-    Phase I adds this route. H proves it's not here.
-    The standing assertion that the H/I scope line held:
-    H's full suite passes without ever invoking registry.
-    """
-    runtime = MockRuntime([_tool_entry("my.tool")])
-    server = McpServer(runtime=runtime)
-    resp = server.dispatch(METHOD_TOOLS_CALL, {"name": "my.tool", "arguments": {}}, "req-1")
-    assert "error" in resp
-    assert resp["error"]["code"] == METHOD_NOT_FOUND
-
 
 def test_h_unknown_method_returns_method_not_found():
     """Any unknown method → -32601 (doc 4 B2, producer side)."""
