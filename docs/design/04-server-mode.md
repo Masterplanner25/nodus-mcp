@@ -401,6 +401,25 @@ client-discovered tools exposed outbound, it registers server tools in a
 separate namespace and filters `list_tools()` before emitting — or uses two
 separate `NodusRuntime` instances.
 
+**Relay naming is collision-safe by construction.** A client-discovered tool's
+raw registry name IS the prefixed form — `mcp.srv1.read_file`, not `read_file`.
+When the server enumerates it, doc 1 B1 emits registry names as-is; the full
+name `mcp.srv1.read_file` goes onto the wire. Two upstream servers exposing the
+same `read_file` produce `mcp.srv1.read_file` and `mcp.srv2.read_file` —
+distinct names, no collision. The "strip the alias prefix" rule in doc 1 B1
+governs the outbound **invocation** path (the adapter strips `mcp.srv1.` before
+sending `tools/call` to the upstream); it does not apply to enumeration. The
+MCP client calling our server sees the full prefixed name and uses it verbatim
+when invoking.
+
+**Known-gap: no loop detection in v0.1.** The relay is transitive: if runtime A
+is a client of runtime B, and B is a client of A, each is re-exposing the
+other's tools. A call into A for a B-origin tool relays to B, which relays back
+to A, and so on. v0.1 has no cycle detection. Loop calls exhaust whatever
+timeout or step budget applies and terminate with a timeout error; there is no
+explicit "cycle detected" diagnostic. This is a documented known-gap, not fixed
+in v0.1.
+
 **No structural interference:** Client connections write to
 `_python_registered_tools` using the `mcp.alias.*` namespace. Server
 enumeration reads from the same store. Both operations are protected by
