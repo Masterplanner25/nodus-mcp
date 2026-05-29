@@ -49,6 +49,9 @@ from .protocol.messages import (
     ElicitationRequest,
     SamplingRequest,
     RootsRequest,
+    InputRequiredResult,
+    SamplingRequiredResult,
+    RootsRequiredResult,
     ResourceDescriptor,
     ResourceContent,
     PromptDescriptor,
@@ -92,6 +95,9 @@ class McpServer:
         self._elicitation_handler = None  # Phase L: set to advertise elicitation capability
         self._sampling_handler = None     # Phase L
         self._roots: list = []            # Phase L: server's own roots (for roots/list responses)
+
+        # Phase L: re-call engine config (round cap, same as C's MRTR cap, doc 2 B1)
+        self._max_elicitation_rounds: int = 10
 
         # Phase J: resource handlers (handler-configured; no language-side registry)
         self._resource_list_handler = None  # fn() → list[dict]   — enumerate resources
@@ -269,26 +275,19 @@ class McpServer:
     # ── Phase I: inbound tools/call invocation ────────────────────────────────────
 
     def _handle_tools_call(self, params: dict) -> dict:
-        """Handle tools/call (doc 4 B1, B2).
+        """Handle tools/call — initial call path (Phases I + L).
 
-        Pipeline: look up tool → validate args → invoke → wrap result.
-
-        Producer-side error table (doc 4 B2 / doc 1 D-table):
-          tool not found  → raises _MethodNotFoundError  → -32601 (never ran)
-          schema mismatch → raises _InvalidParamsError   → -32602 (never ran)
-          tool raises     → ToolCallResult isError:true, execution_failure
-          tool_error rec  → ToolCallResult isError:true, execution_failure
-          success         → ToolCallResult (no isError)
-
-        Ordering invariant (doc 1 D2 producer side): invoke() is NEVER called
-        with args that failed schema validation. Validated separately before
-        invoke() because ToolRegistry.invoke() does not validate (confirmed
-        against embedding.py:98–142 — it calls the handler directly).
-
-        No run_source() context required (doc 4 B1): the server handles
-        requests outside any enclosing script execution. _python_registered_tools
-        is the normal production path when last_vm is None.
+        L adds: requestState check at the top (continuation path) and
+        sentinel detection replacing I's stub. The re-call engine
+        (_handle_sentinel, _handle_continuation) is separate from I's
+        invoke path so the two concerns don't blur.
         """
+        # L: continuation path — has requestState from a prior sentinel return
+        request_state_blob = params.get("requestState")
+        if request_state_blob:
+            return self._handle_tools_call_continuation(params, request_state_blob)
+
+        # I: initial path (no requestState)
         if self._runtime is None:
             raise _MethodNotFoundError("no runtime configured")
 
@@ -296,42 +295,130 @@ class McpServer:
         if not isinstance(name, str) or not name:
             raise _InvalidParamsError("tools/call requires a non-empty string 'name'")
 
-        # I2.a: Look up tool entry (not-found → -32601)
         entry = self._runtime.tool_registry.lookup(name)
         if entry is None:
             raise _MethodNotFoundError(f"Tool '{name}' is not registered")
 
-        # I3: Validate args BEFORE invoke() — ordering invariant
         args = params.get("arguments") or {}
         schema = entry.get("schema") or {}
         val_err = _validate_args(args, schema)
         if val_err:
             raise _InvalidParamsError(f"Tool '{name}': {val_err}")
 
-        # I2.b: Invoke — KeyError = post-lookup not-found; any other exc = execution fail
         try:
             result = self._runtime.tool_registry.invoke(name, args)
         except KeyError:
             raise _MethodNotFoundError(f"Tool '{name}' is not registered")
         except Exception as exc:
-            return ToolCallResult.error(
-                ToolErrorCategory.EXECUTION_FAILURE, str(exc)
-            ).to_dict()
+            return ToolCallResult.error(ToolErrorCategory.EXECUTION_FAILURE, str(exc)).to_dict()
 
-        # I2.c: Sentinel return types → server-issued elicitation/sampling (Phase L)
+        # L: sentinel return → re-call engine (replaces I's Phase L stub)
         if isinstance(result, (ElicitationRequest, SamplingRequest, RootsRequest)):
-            return ToolCallResult.error(
-                ToolErrorCategory.EXECUTION_FAILURE,
-                f"Tool returned {type(result).__name__}; "
-                "server-issued elicitation/sampling requires Phase L",
-            ).to_dict()
+            return self._handle_sentinel(result, name, args, round_count=1)
 
-        # I2.d: Nodus tool_error Record translated by _to_host_value → __nodus_err__
         if isinstance(result, dict) and result.get("__nodus_err__"):
             msg = result.get("message") or repr(result)
             return ToolCallResult.error(ToolErrorCategory.EXECUTION_FAILURE, msg).to_dict()
 
-        # I2.e: Success
+        return ToolCallResult.from_python_value(result).to_dict()
+
+    # ── Phase L: re-call engine ────────────────────────────────────────────────────
+
+    def _handle_sentinel(
+        self,
+        sentinel: ElicitationRequest | SamplingRequest | RootsRequest,
+        tool_name: str,
+        orig_args: dict,
+        round_count: int,
+    ) -> dict:
+        """One re-call engine for all sentinel types (doc 5 B2 anti-drift).
+
+        Dispatches by sentinel type — ElicitationRequest, SamplingRequest, and
+        RootsRequest all flow through this function with a type switch. If L
+        had _handle_elicitation_recall and _handle_sampling_recall as parallel
+        functions, doc 5 B2's anti-drift settlement would be broken.
+
+        Re-call, not block (the inversion of C): no thread parks here.
+        The sentinel is returned, requestState is encoded, the elicitation
+        goes out as the response to the inbound tools/call. The continuation
+        arrives as a new request — transport-agnostic, because it rides the
+        response/re-call channel, not an out-of-band push (doc 4 C1).
+        """
+        if round_count > self._max_elicitation_rounds:
+            return ToolCallResult.error(
+                ToolErrorCategory.ELICITATION_ROUNDS_EXCEEDED,
+                f"elicitation exceeded {self._max_elicitation_rounds} rounds",
+            ).to_dict()
+
+        if isinstance(sentinel, ElicitationRequest):
+            rs = _encode_request_state(tool_name, orig_args, round_count, sentinel.state, "elicit")
+            return InputRequiredResult(
+                input_requests=sentinel.input_requests,
+                request_state=rs,
+            ).to_dict()
+        if isinstance(sentinel, SamplingRequest):
+            rs = _encode_request_state(tool_name, orig_args, round_count, sentinel.state, "sample")
+            return SamplingRequiredResult(
+                messages=sentinel.messages,
+                params=sentinel.params,
+                request_state=rs,
+            ).to_dict()
+        if isinstance(sentinel, RootsRequest):
+            rs = _encode_request_state(tool_name, orig_args, round_count, sentinel.state, "roots")
+            return RootsRequiredResult(request_state=rs).to_dict()
+        # unreachable — isinstance guard above covers all sentinel types
+        raise _InvalidParamsError(f"Unknown sentinel: {type(sentinel).__name__}")
+
+    def _handle_tools_call_continuation(self, params: dict, rs_blob: str) -> dict:
+        """Handle a tools/call continuation (the re-called path).
+
+        Decodes requestState (in exactly one place — C3 server-side),
+        injects the response into orig_args, re-invokes the tool.
+        The tool sees its checkpoint state restored as if it was mid-execution,
+        but there is no parked thread — this is a fresh invocation.
+        """
+        if self._runtime is None:
+            raise _MethodNotFoundError("no runtime configured")
+
+        state = _decode_request_state(rs_blob)
+        if state is None:
+            raise _InvalidParamsError("Invalid requestState: cannot decode")
+
+        tool_name = state.get("t")
+        orig_args = state.get("a") or {}
+        round_count = state.get("r", 1)
+        handler_state = state.get("s") or {}
+        sentinel_type = state.get("st")
+
+        if not tool_name or not sentinel_type:
+            raise _InvalidParamsError("Invalid requestState: missing fields")
+
+        # Cap check (same bound as initial-call path, doc 2 B1)
+        if round_count > self._max_elicitation_rounds:
+            return ToolCallResult.error(
+                ToolErrorCategory.ELICITATION_ROUNDS_EXCEEDED,
+                f"elicitation exceeded {self._max_elicitation_rounds} rounds",
+            ).to_dict()
+
+        # Inject the client's response into augmented_args for the re-call
+        response_data = _extract_continuation_response(params, sentinel_type)
+        augmented_args = _inject_continuation(orig_args, handler_state, sentinel_type, response_data)
+
+        try:
+            result = self._runtime.tool_registry.invoke(tool_name, augmented_args)
+        except KeyError:
+            raise _MethodNotFoundError(f"Tool '{tool_name}' is not registered")
+        except Exception as exc:
+            return ToolCallResult.error(ToolErrorCategory.EXECUTION_FAILURE, str(exc)).to_dict()
+
+        # Another sentinel → loop through the same engine (bounded by cap above)
+        if isinstance(result, (ElicitationRequest, SamplingRequest, RootsRequest)):
+            return self._handle_sentinel(result, tool_name, orig_args, round_count + 1)
+
+        if isinstance(result, dict) and result.get("__nodus_err__"):
+            msg = result.get("message") or repr(result)
+            return ToolCallResult.error(ToolErrorCategory.EXECUTION_FAILURE, msg).to_dict()
+
         return ToolCallResult.from_python_value(result).to_dict()
 
 
@@ -443,6 +530,83 @@ class McpServer:
         if raw.get("description"):
             result["description"] = raw["description"]
         return result
+
+
+# ── Phase L helpers: re-call engine (requestState encode/decode, injection) ─────
+
+def _encode_request_state(
+    tool_name: str,
+    orig_args: dict,
+    round_count: int,
+    handler_state: dict,
+    sentinel_type: str,
+) -> str:
+    """Encode server-side requestState as an opaque base64 blob.
+
+    The one encode location (C3 server-side). The blob carries what a
+    re-called tool needs:
+      t: tool name  a: original args  r: round count
+      s: handler checkpoint (sentinel.state)  st: sentinel type
+
+    sentinel_type ("elicit" | "sample" | "roots") is stored so the
+    continuation path knows which injection key to use on re-call.
+    """
+    import base64 as _b64, json as _json
+    blob = {
+        "t": tool_name,
+        "a": orig_args,
+        "r": round_count,
+        "s": handler_state or {},
+        "st": sentinel_type,
+    }
+    return _b64.b64encode(_json.dumps(blob, separators=(",", ":")).encode()).decode()
+
+
+def _decode_request_state(blob: str) -> dict | None:
+    """Decode requestState blob. The one decode location (C3 server-side).
+
+    Returns None on any decode error — caller converts to -32602.
+    Invalid base64/JSON is handled gracefully; opaqueness boundary enforced.
+    """
+    import base64 as _b64, json as _json
+    try:
+        return _json.loads(_b64.b64decode(blob).decode())
+    except Exception:
+        return None
+
+
+def _extract_continuation_response(params: dict, sentinel_type: str) -> object:
+    """Extract the client's response from a continuation tools/call params."""
+    if sentinel_type == "elicit":
+        return params.get("inputResponses") or []
+    if sentinel_type == "sample":
+        return params.get("samplingResult")
+    if sentinel_type == "roots":
+        return params.get("roots") or []
+    return None
+
+
+def _inject_continuation(
+    orig_args: dict,
+    handler_state: dict,
+    sentinel_type: str,
+    response_data: object,
+) -> dict:
+    """Inject the continuation response into a copy of orig_args (doc 4 C2).
+
+    The tool handler checks for the injection key to know it's on a re-call:
+      __elicitation_state__: {"responses": ..., "state": <handler checkpoint>}
+      __sampling_state__:    {"result": ..., "state": <handler checkpoint>}
+      __roots__:             [list of roots dicts]
+    """
+    augmented = dict(orig_args)
+    if sentinel_type == "elicit":
+        augmented["__elicitation_state__"] = {"responses": response_data, "state": handler_state}
+    elif sentinel_type == "sample":
+        augmented["__sampling_state__"] = {"result": response_data, "state": handler_state}
+    elif sentinel_type == "roots":
+        augmented["__roots__"] = response_data
+    return augmented
 
 
 # ── Phase I helpers: arg validation (inlined; no nodus-lang internal import) ───
