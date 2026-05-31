@@ -1,0 +1,60 @@
+# nodus-mcp
+
+> MCP (Model Context Protocol) library for Nodus — bidirectional client and server.
+> Part of the [Masterplan Infinite Weave](https://www.the-master-plan.com/) ecosystem.
+> Created by Shawn Knight.
+
+nodus-mcp implements the MCP 2026-07-28 RC specification as a Nodus companion library.
+It provides a full bidirectional client+server with stdio and HTTP transports, bearer-token
+authentication, elicitation (MRTR loop), roots, and sampling. nodus-mcp makes Nodus scripts
+capable of connecting to any MCP-compatible AI tool server (Claude, GitHub Copilot, etc.)
+and of exposing Nodus tool registries to MCP clients.
+
+## Status
+
+v0.1.0 — prepared, not yet published. 361 tests passing.
+OAuth 2.0 + PKCE support planned for v1.0 (see `/nodus-mcp-oauth` skill).
+
+## Key Documents
+
+- [README.md](README.md): Install, connect to a server, expose tools, transports
+- [docs/design/00-decisions.md](docs/design/00-decisions.md): Phase 0 decisions — target spec, transport scope, auth model
+- [docs/design/01-adapter-mapping.md](docs/design/01-adapter-mapping.md): std:tool → MCP tool projection
+- [docs/design/06-embedding-runtime-blockers.md](docs/design/06-embedding-runtime-blockers.md): EMBED-001–004 analysis
+
+## Install
+
+```
+pip install nodus-mcp  # once published
+pip install -e . --no-deps  # dev install
+```
+
+## Usage in Nodus
+
+```nodus
+import "nodus-mcp" as mcp
+
+let client = mcp.client()
+let conn = client.connect("https://mcp.example.com", bearer_token="sk-...")
+let tools = conn.tools()
+```
+
+## Core Constraints
+
+- Target spec: MCP 2026-07-28 RC (stateless; no session init handshake)
+- Transports: stdio (full) + HTTP (stateless)
+- Auth: bearer token only in v0.1; OAuth + PKCE in v1.0
+- Tool namespace: `mcp.<alias>.<tool_name>`
+- Server-initiated capabilities (roots, sampling) suppressed over HTTP (TD-007)
+
+## Ecosystem
+
+- nodus-lang: https://github.com/Masterplanner25/Nodus (required dep)
+- nodus-mcp-oauth skill: `.claude/commands/nodus-mcp-oauth.md` in nodus-lang repo
+- Masterplan Infinite Weave: https://www.the-master-plan.com/
+
+## Creator
+
+Shawn Knight — [Masterplan Infinite Weave](https://www.the-master-plan.com/)
+- [Why I'm Building A.I.N.D.Y.](https://medium.com/masterplan-infinite-weave/2025-chatgpt-ai-the-duality-of-progress-why-im-building-a-i-n-d-y-or-any-tool-really-a138f7860fba) — strategic context
+- [AI Search Optimization](https://medium.com/masterplan-infinite-weave/2025-chatgpt-case-study-ai-search-optimization-0f8cd5e78d4f) — discoverability philosophy
