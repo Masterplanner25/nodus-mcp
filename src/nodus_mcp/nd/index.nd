@@ -1,5 +1,4 @@
 // nodus-mcp — MCP library for Nodus
-// Status: pre-implementation scaffold.
-// Phase 1 design and Phase A implementation are pending.
+// v0.1.0 — MCP 2026-07-28 RC, bidirectional client/server, bearer-token auth.
 
 let _version = "0.1.0"
