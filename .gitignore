@@ -19,3 +19,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Test artifacts
+.coverage
+htmlcov/
+.ruff_cache/
