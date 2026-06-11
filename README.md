@@ -3,8 +3,7 @@
 Model Context Protocol (MCP) library for [Nodus](https://github.com/Masterplanner25/Nodus)
 — bidirectional client and server, implementing the 2026-07-28 RC specification.
 
-**Status: v0.1.0 prepared, not yet published.** Waiting for the coordinated launch
-with nodus-lang 4.0.0 and nodus-a2a v0.1.0. Two of three artifacts are ready.
+**Status: v0.1.0 — published on [PyPI](https://pypi.org/project/nodus-mcp/).**
 
 ---
 

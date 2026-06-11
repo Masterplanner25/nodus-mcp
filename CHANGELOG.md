@@ -1,10 +1,7 @@
 # nodus-mcp Changelog
 
-## [0.1.0] — PREPARED, NOT RELEASED
+## [0.1.0] — 2026-06-10
 
-> **Coordinated launch:** nodus-mcp v0.1.0 is prepared but not published.
-> Release waits for nodus-a2a v0.1.0 to exist. All three artifacts
-> (nodus-lang 4.0.0, nodus-mcp 0.1.0, nodus-a2a 0.1.0) ship together.
 
 ### Summary
 
