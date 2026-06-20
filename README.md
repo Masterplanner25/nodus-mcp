@@ -27,7 +27,6 @@ conn = client.connect(transport, alias="srv")
 ## Installation
 
 ```bash
-# Once nodus-lang 4.0.0 is on PyPI:
 pip install nodus-mcp
 
 # Development install (both repos checked out):
