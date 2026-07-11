@@ -1,5 +1,18 @@
 # nodus-mcp Changelog
 
+## [0.1.1] — 2026-07-11
+
+### Fixed
+
+- **Packaging: `nodus_mcp_aindy` adapters were excluded from the built wheel**
+  (#5). The AINDY adapter layer (`tool`, `naming`, `schema`, `adapters.syscall`,
+  `client`, `server`) lived at the repo root, but `[tool.setuptools.packages.find]`
+  only discovers packages under `where = ["src"]`, so `pip install nodus-mcp`
+  shipped the MCP wire stack without the adapters. Moved `nodus_mcp_aindy/` under
+  `src/` so it is discovered by the existing configuration and included in the
+  wheel. Unblocks downstream consumers (e.g. `aindy-runtime`'s client-side MCP
+  plugin) that depend on `nodus_mcp_aindy` as a pip dependency. No API changes.
+
 ## [0.1.0] — 2026-06-10
 
 

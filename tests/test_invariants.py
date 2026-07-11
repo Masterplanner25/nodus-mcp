@@ -149,12 +149,25 @@ def test_readme_has_oauth_warning():
 
 
 def test_version_is_not_dev():
-    """N4: version is 0.1.0 (not dev0) — release-ready but not published."""
+    """N4: version is a clean release string, in sync with pyproject.toml, no dev suffix."""
+    import pathlib
+    import re
+
     from nodus_mcp import __version__
-    assert __version__ == "0.1.0", (
-        f"Expected version 0.1.0 for release prep; got {__version__!r}"
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__), (
+        f"Expected a clean X.Y.Z release version; got {__version__!r}"
     )
     assert "dev" not in __version__, "dev version must be removed before release prep"
+
+    # Single source of truth: __version__ must match pyproject.toml.
+    pyproject = (pathlib.Path(__file__).parent.parent / "pyproject.toml").read_text()
+    m = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    assert m, "could not find version in pyproject.toml"
+    assert __version__ == m.group(1), (
+        f"version mismatch: __init__.py has {__version__!r}, "
+        f"pyproject.toml has {m.group(1)!r}"
+    )
 
 
 def test_cli_entry_point_declared():
