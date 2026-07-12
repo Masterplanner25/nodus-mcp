@@ -170,3 +170,47 @@ async def test_auth_hook_exception_returns_error():
         assert result.isError is True
 
     await _run_server_test(server, check)
+
+
+# closes: #8
+@pytest.mark.asyncio
+async def test_auth_hook_receives_request_context():
+    """#8: auth_hook must get real per-call context, not an empty dict, so a
+    host can map the session to an identity."""
+    seen = []
+
+    def hook(name, args, meta):
+        seen.append(meta)
+
+    tool = _make_tool("secure_tool")
+    server = NodusServer(_make_registry(tool), auth_hook=hook)
+
+    async def check(session):
+        await session.call_tool("secure_tool", {"x": "1"})
+        assert len(seen) == 1
+        meta = seen[0]
+        # Regression guard: previously this was always {}.
+        assert meta != {}, "auth_hook context is empty — cannot map session to identity"
+        assert "request_id" in meta
+        assert meta.get("session") is not None, "no MCP session exposed to auth_hook"
+
+    await _run_server_test(server, check)
+
+
+# ── SSE app wiring ──────────────────────────────────────────────────────────────
+
+# closes: #7
+def test_run_sse_app_mounts_messages_endpoint():
+    """#7: run_sse_app must mount /messages/ (the SSE post-back route), else
+    clients 404 on message post-back and the session never initialises."""
+    from starlette.routing import Mount, Route
+
+    server = NodusServer(_make_registry(_make_tool("t")))
+    app = server.run_sse_app()
+
+    assert any(
+        isinstance(r, Route) and r.path == "/sse" for r in app.routes
+    ), "SSE GET event-stream route (/sse) missing"
+    assert any(
+        isinstance(r, Mount) and r.path.rstrip("/") == "/messages" for r in app.routes
+    ), "/messages/ POST mount missing — SSE clients would 404 on post-back"

@@ -1,5 +1,23 @@
 # nodus-mcp Changelog
 
+## [0.1.2] — 2026-07-12
+
+### Fixed
+
+- **`NodusServer.run_sse_app()` omitted the `/messages/` POST mount** (#7). The
+  SSE transport is two-endpoint — clients open the GET event stream at `/sse`
+  and POST messages back to `/messages/` — but only `/sse` was mounted, so a
+  client's post-back 404'd and the session never initialised. Now mounts
+  `sse.handle_post_message` at `/messages/`. Server-side SSE only; the client
+  adapter was unaffected.
+- **`auth_hook` received an empty context `{}`** (#8), so it could not
+  distinguish callers or map a session to an identity. It now receives a
+  best-effort per-call context built from the MCP SDK's `RequestContext`:
+  `request_id`, `session` (the MCP `ServerSession`), client `_meta`, and — over
+  SSE/HTTP — the transport `request` and its `headers` (e.g. the bearer token).
+  Unblocks per-session identity mapping for multi-tenant MCP servers. `{}` is
+  still returned when no request context is active (e.g. stdio pre-session).
+
 ## [0.1.1] — 2026-07-11
 
 ### Fixed

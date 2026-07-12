@@ -55,6 +55,44 @@ except ImportError:
     _types = None
 
 
+def _request_meta(server: Any) -> dict:
+    """Best-effort per-call context for ``auth_hook``.
+
+    Reads the MCP SDK's per-request ``RequestContext`` (a contextvar the
+    low-level ``Server`` sets while handling a call) and surfaces the pieces a
+    host needs to map a caller to an identity:
+
+    - ``request_id`` — opaque per-call id
+    - ``session``    — the MCP ``ServerSession`` (stable per connection)
+    - ``meta``       — client-supplied ``_meta``, if any
+    - ``request``    — the transport request over SSE/HTTP (Starlette ``Request``)
+    - ``headers``    — that request's headers as a plain dict (e.g. bearer token)
+
+    Returns ``{}`` when no context is available — e.g. accessed outside a
+    request, or an SDK build without ``request_context``. Never raises.
+    """
+    meta: dict = {}
+    try:
+        rc = server.request_context
+    except (LookupError, AttributeError):
+        return meta
+    meta["request_id"] = getattr(rc, "request_id", None)
+    meta["session"] = getattr(rc, "session", None)
+    client_meta = getattr(rc, "meta", None)
+    if client_meta is not None:
+        meta["meta"] = client_meta
+    request = getattr(rc, "request", None)
+    if request is not None:
+        meta["request"] = request
+        headers = getattr(request, "headers", None)
+        if headers is not None:
+            try:
+                meta["headers"] = dict(headers)
+            except Exception:
+                pass
+    return meta
+
+
 class NodusServer:
     """Expose a ``ToolRegistry`` as an MCP server.
 
@@ -63,8 +101,14 @@ class NodusServer:
         name:       MCP server name shown to clients.
         version:    Server version string.
         auth_hook:  Optional callable invoked before each tool call.
-                    Signature: ``(tool_name: str, args: dict, meta: dict) → None``.
-                    Raise any exception to deny the call.
+                    Signature: ``(tool_name: str, args: dict, context: dict) → None``.
+                    *context* is a best-effort per-call dict — see
+                    :func:`_request_meta`. Over SSE/HTTP it carries
+                    ``session``, ``request_id``, ``request`` and ``headers``
+                    (e.g. the bearer token), enabling per-session identity
+                    mapping; over stdio it carries whatever the SDK exposes
+                    (``session``/``request_id``) and is ``{}`` when no request
+                    context is active. Raise any exception to deny the call.
     """
 
     def __init__(
@@ -112,7 +156,7 @@ class NodusServer:
             args = dict(arguments or {})
 
             if auth_hook is not None:
-                auth_hook(name, args, {})
+                auth_hook(name, args, _request_meta(server))
 
             try:
                 result = tool.handler(args)
@@ -185,7 +229,7 @@ class NodusServer:
         """
         from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette
-        from starlette.routing import Route
+        from starlette.routing import Mount, Route
 
         sse = SseServerTransport("/messages/")
 
@@ -196,4 +240,12 @@ class NodusServer:
                 opts = self._server.create_initialization_options()
                 await self._server.run(read, write, opts)
 
-        return Starlette(routes=[Route("/sse", endpoint=_handle_sse)])
+        # The SSE transport is two-endpoint: clients open the GET event stream
+        # at /sse and POST messages back to /messages/. Without the /messages/
+        # mount the post-back 404s and the session never initialises (#7).
+        return Starlette(
+            routes=[
+                Route("/sse", endpoint=_handle_sse),
+                Mount("/messages/", app=sse.handle_post_message),
+            ]
+        )

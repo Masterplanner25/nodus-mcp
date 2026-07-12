@@ -2,7 +2,7 @@
 
 Phase A foundation exports: wire types, codec, transport ABCs, connection handle.
 """
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from .protocol import (
     # JSON-RPC error codes (doc 1 D-table — reference constants, not literals)
