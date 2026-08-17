@@ -1,5 +1,23 @@
 # nodus-mcp Changelog
 
+## [0.1.3] — 2026-08-17
+
+### Changed
+
+- **Floated the `nodus-lang` dependency to `>=4.0.0`** (was `>=4.0.0,<5.0.0`).
+  The upper bound made this package uninstallable alongside nodus-lang 5.0.0:
+  `pip install "nodus-lang==5.0.0" "nodus-mcp>=0.1.2"` failed with
+  `ResolutionImpossible`. Nothing in the code was incompatible — the full suite
+  (363 tests) passes against 5.0.0 unchanged.
+
+  The cap was prophylactic rather than earned; no 5.x break was ever recorded
+  here. A hard upper bound on a first-party dependency turns every nodus-lang
+  major into a two-repo release train with downstream consumers frozen in
+  between — which is exactly what happened: aindy-runtime pins nodus-lang
+  exactly and ships an optional `[mcp]` extra, so this cap held it on 4.2.0.
+  This package's own suite is the check that catches a real break; a cap earns
+  its place once a break is known.
+
 ## [0.1.2] — 2026-07-12
 
 ### Fixed
