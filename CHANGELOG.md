@@ -1,5 +1,44 @@
 # nodus-mcp Changelog
 
+## [0.1.4] — 2026-09-18
+
+### Fixed
+
+- **`nodus_mcp_aindy` works with the mcp SDK 2.x** (#11). `NodusServer`
+  registered its handlers through the 1.x decorator API (`@server.list_tools()`
+  / `@server.call_tool()`), which mcp 2.0 removed, so with mcp ≥ 2.0 installed
+  constructing a `NodusServer` raised `'Server' object has no attribute
+  'list_tools'`. aindy-runtime — whose `mcp-server` command is this class —
+  had capped `mcp<2` as `MCP-SDK-2X-1` waiting on this release.
+
+  The server has one implementation with a branch per SDK major, chosen once
+  at import (`_SDK_V2`): on 2.x handlers are registered with
+  `add_request_handler`, take `(ctx, params)`, and build the `isError` result
+  the 1.x decorator used to build from a raised exception; the per-call
+  context `auth_hook` receives (#8) comes from `ctx` rather than the SDK's
+  contextvar. 1.x is unchanged. Both branches are driven by the same tests
+  through a real `ClientSession`, and the run names the branch it exercised.
+
+- **`MCPClientAdapter` / `discover_tools` no longer lose every tool's schema
+  under mcp 2.x.** The SDK renamed `Tool.inputSchema` to `input_schema`; a
+  `getattr` on the old name defaulted to `{}` for every discovered tool, with
+  no error. Read under either name now.
+
+- **The SSE endpoint returned `None` after each session**, which Starlette
+  reports as `TypeError: 'NoneType' object is not callable` once the stream
+  closes — every connection, on current Starlette. It returns an empty
+  `Response`, as the SDK's own SSE example does. This is the defect
+  nodus-mcp-server's 0.1.11 message described; it had never been driven here.
+
+### Added
+
+- `tests/test_sse_end_to_end.py`: `run_sse_app()` under uvicorn on a free
+  port, driven by the package's own `discover_tools` and `MCPClientAdapter`
+  through a real `initialize` → `tools/list` → `tools/call`, with the schema,
+  an error result and the auth-hook context (headers included) asserted over
+  the wire. Nothing had run the SSE transport before; the route test
+  inspected the app's routes.
+
 ## [0.1.3] — 2026-08-17
 
 ### Changed

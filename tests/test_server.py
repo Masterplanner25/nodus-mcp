@@ -26,6 +26,14 @@ def _make_tool(name: str, handler=None) -> ToolDefinition:
     )
 
 
+def _field(model, camel: str):
+    """Read a result field under either SDK major: mcp 2.x renamed the model
+    attributes to snake_case (`isError` -> `is_error`, `inputSchema` ->
+    `input_schema`) while still accepting the camelCase names on construction.
+    The server is one implementation driven under both; the tests read both."""
+    snake = "".join("_" + c.lower() if c.isupper() else c for c in camel)
+    return getattr(model, snake) if hasattr(model, snake) else getattr(model, camel)
+
 async def _run_server_test(server: NodusServer, test_fn):
     """Run *test_fn(session)* with an in-process MCP client."""
     send1, recv1 = anyio.create_memory_object_stream(100)
@@ -101,8 +109,8 @@ async def test_list_tools_schema_preserved():
         result = await session.list_tools()
         assert len(result.tools) == 1
         t = result.tools[0]
-        assert t.inputSchema["properties"]["query"]["type"] == "string"
-        assert "query" in t.inputSchema.get("required", [])
+        assert _field(t, "inputSchema")["properties"]["query"]["type"] == "string"
+        assert "query" in _field(t, "inputSchema").get("required", [])
 
     await _run_server_test(server, check)
 
@@ -130,7 +138,7 @@ async def test_call_unknown_tool_returns_error():
     async def check(session):
         # MCP returns an error result, not a Python exception
         result = await session.call_tool("nonexistent", {})
-        assert result.isError is True
+        assert _field(result, "isError") is True
 
     await _run_server_test(server, check)
 
@@ -167,7 +175,7 @@ async def test_auth_hook_exception_returns_error():
     async def check(session):
         # auth hook exception becomes an MCP error result
         result = await session.call_tool("restricted", {})
-        assert result.isError is True
+        assert _field(result, "isError") is True
 
     await _run_server_test(server, check)
 

@@ -54,13 +54,25 @@ except ImportError:
     _Server = None
     _types = None
 
+#: Which SDK generation is installed (#11). mcp 2.0 removed the decorator
+#: registration (`@server.list_tools()` / `@server.call_tool()`) and the
+#: `request_context` contextvar; a handler is registered with
+#: `add_request_handler(method, params_type, handler)`, takes `(ctx, params)`,
+#: and returns a result model itself -- including the `isError` result the 1.x
+#: decorator used to build from a raised exception. One question, answered
+#: once, here; both branches below are driven by the same tests, which speak
+#: to the server through a real `ClientSession`.
+_SDK_V2 = bool(_MCP_AVAILABLE and hasattr(_Server, "add_request_handler"))
 
-def _request_meta(server: Any) -> dict:
+
+def _request_meta(server: Any, ctx: Any = None) -> dict:
     """Best-effort per-call context for ``auth_hook``.
 
-    Reads the MCP SDK's per-request ``RequestContext`` (a contextvar the
-    low-level ``Server`` sets while handling a call) and surfaces the pieces a
-    host needs to map a caller to an identity:
+    On mcp 2.x the runner hands each handler a ``ServerRequestContext``
+    (``ctx``); on 1.x the same fields live on the SDK's per-request
+    ``RequestContext`` contextvar the low-level ``Server`` sets while handling
+    a call. Either way, surface the pieces a host needs to map a caller to an
+    identity:
 
     - ``request_id`` — opaque per-call id
     - ``session``    — the MCP ``ServerSession`` (stable per connection)
@@ -72,10 +84,12 @@ def _request_meta(server: Any) -> dict:
     request, or an SDK build without ``request_context``. Never raises.
     """
     meta: dict = {}
-    try:
-        rc = server.request_context
-    except (LookupError, AttributeError):
-        return meta
+    rc = ctx
+    if rc is None:
+        try:
+            rc = server.request_context
+        except (LookupError, AttributeError):
+            return meta
     meta["request_id"] = getattr(rc, "request_id", None)
     meta["session"] = getattr(rc, "session", None)
     client_meta = getattr(rc, "meta", None)
@@ -131,48 +145,80 @@ class NodusServer:
         self._server: "_Server" = _Server(name)
         self._setup_handlers()
 
+    def _tools(self) -> list:
+        return [
+            _types.Tool(
+                name=t.name,
+                description=t.description,
+                inputSchema=t.input_schema,
+            )
+            for t in self._registry.list()
+        ]
+
+    def _invoke(self, name: str, arguments: Optional[dict], meta: dict) -> list:
+        """Run one tool call: auth hook, handler, text content. Raises on
+        an unknown tool, a denied call, or a handler error -- each SDK branch
+        decides how a raise reaches the client, so this stays transport-free."""
+        tool = self._registry.get(name)
+        if tool is None:
+            raise ValueError(f"Unknown tool: {name!r}")
+
+        args = dict(arguments or {})
+
+        if self._auth_hook is not None:
+            self._auth_hook(name, args, meta)
+
+        try:
+            result = tool.handler(args)
+        except Exception as exc:
+            logger.warning("[NodusServer] Tool %r raised: %s", name, exc)
+            raise
+
+        # MCP returns text content; serialise non-string results
+        if isinstance(result, str):
+            text = result
+        elif isinstance(result, dict):
+            text = json.dumps(result)
+        else:
+            text = str(result)
+
+        return [_types.TextContent(type="text", text=text)]
+
     def _setup_handlers(self) -> None:
         server = self._server
-        registry = self._registry
-        auth_hook = self._auth_hook
 
+        if _SDK_V2:
+            # mcp >= 2: (ctx, params) -> result model. A raise inside a
+            # handler is a protocol error to the runner, so the `isError`
+            # result the 1.x decorator built for us is built here instead --
+            # an unknown tool, a denied call and a handler exception all
+            # reach the client as `CallToolResult(isError=True)`, as before.
+            async def _list_tools_v2(ctx: Any, params: Any) -> Any:
+                return _types.ListToolsResult(tools=self._tools())
+
+            async def _call_tool_v2(ctx: Any, params: Any) -> Any:
+                try:
+                    content = self._invoke(params.name, params.arguments, _request_meta(server, ctx))
+                except Exception as exc:
+                    return _types.CallToolResult(
+                        content=[_types.TextContent(type="text", text=str(exc))],
+                        isError=True,
+                    )
+                return _types.CallToolResult(content=content)
+
+            server.add_request_handler("tools/list", _types.PaginatedRequestParams, _list_tools_v2)
+            server.add_request_handler("tools/call", _types.CallToolRequestParams, _call_tool_v2)
+            return
+
+        # mcp 1.x: the decorator API. It wraps a raise into an error result
+        # and exposes the request context through `server.request_context`.
         @server.list_tools()
         async def _list_tools() -> list:
-            return [
-                _types.Tool(
-                    name=t.name,
-                    description=t.description,
-                    inputSchema=t.input_schema,
-                )
-                for t in registry.list()
-            ]
+            return self._tools()
 
         @server.call_tool()
         async def _call_tool(name: str, arguments: dict | None) -> list:
-            tool = registry.get(name)
-            if tool is None:
-                raise ValueError(f"Unknown tool: {name!r}")
-
-            args = dict(arguments or {})
-
-            if auth_hook is not None:
-                auth_hook(name, args, _request_meta(server))
-
-            try:
-                result = tool.handler(args)
-            except Exception as exc:
-                logger.warning("[NodusServer] Tool %r raised: %s", name, exc)
-                raise
-
-            # MCP returns text content; serialise non-string results
-            if isinstance(result, str):
-                text = result
-            elif isinstance(result, dict):
-                text = json.dumps(result)
-            else:
-                text = str(result)
-
-            return [_types.TextContent(type="text", text=text)]
+            return self._invoke(name, arguments, _request_meta(server))
 
     def get_tool_count(self) -> int:
         """Return the number of (non-deprecated) tools in the registry."""
@@ -229,6 +275,7 @@ class NodusServer:
         """
         from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette
+        from starlette.responses import Response
         from starlette.routing import Mount, Route
 
         sse = SseServerTransport("/messages/")
@@ -239,6 +286,11 @@ class NodusServer:
             ) as (read, write):
                 opts = self._server.create_initialization_options()
                 await self._server.run(read, write, opts)
+            # The stream has already been written through `request._send`;
+            # Starlette still expects a callable response from a `Route`
+            # endpoint, and `None` here is a `TypeError` after every session
+            # closes (#11). The SDK's own SSE example returns exactly this.
+            return Response()
 
         # The SSE transport is two-endpoint: clients open the GET event stream
         # at /sse and POST messages back to /messages/. Without the /messages/

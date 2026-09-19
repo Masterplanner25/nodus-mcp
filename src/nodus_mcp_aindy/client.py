@@ -46,7 +46,11 @@ def _mcp_tool_to_definition(
     """Convert an ``mcp.types.Tool`` to a ``ToolDefinition`` that calls back to *adapter*."""
     name = tool.name
     description = str(getattr(tool, "description", "") or "")
-    raw_schema = getattr(tool, "inputSchema", None) or {}
+    # mcp 2.x renamed the model attribute to `input_schema`; 1.x has only
+    # `inputSchema`. A `getattr` default of `{}` on the wrong name is the
+    # silent failure to avoid: every discovered tool arriving with an empty
+    # schema and no error (#11).
+    raw_schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None) or {}
 
     async def _remote_handler(args: dict[str, Any]) -> dict[str, Any]:
         return await adapter.call_tool(name, args)
