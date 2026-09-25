@@ -1,5 +1,29 @@
 # nodus-mcp Changelog
 
+## [0.1.5] — 2026-09-25
+
+### Fixed
+
+- **`--version` and the serve banners report the real version again.** 0.1.4
+  shipped with `src/nodus_mcp/__init__.py` still on `"0.1.3"` while
+  `pyproject.toml` said `0.1.4`, so the published 0.1.4 printed `nodus-mcp 0.1.3`
+  from `nodus-mcp --version` and from both the stdio and HTTP serve banners. The
+  package itself was 0.1.4 in every other respect; only the string it reports was
+  wrong.
+
+  `3966a56` — the mcp SDK 2.x port, released as 0.1.4 — bumped `pyproject.toml`
+  and left `__init__.py` on the value the 0.1.3 release commit had set. PyPI is
+  immutable, so 0.1.4 keeps its wrong banner; 0.1.5 exists to correct it.
+
+  **Found by a dependent's release gate, not by this repo.** nodus-lang's Gate
+  10a runs every dependent suite before it publishes, and cutting nodus-lang
+  5.15.0 turned `tests/test_invariants.py::test_version_is_not_dev` red here —
+  the invariant that asserts the two version sources agree. It has been in this
+  repo the whole time and nothing ran it between the 0.1.4 tag and that gate.
+
+  No behaviour change beyond the reported string. If you are on 0.1.4, upgrading
+  is optional unless you read the version programmatically.
+
 ## [0.1.4] — 2026-09-18
 
 ### Fixed

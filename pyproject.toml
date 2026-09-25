@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nodus-mcp"
-version = "0.1.4"
+version = "0.1.5"
 description = "MCP (Model Context Protocol) library for Nodus — bidirectional client + server"
 authors = [{ name = "Shawn Knight" }]
 license = { file = "LICENSE" }
