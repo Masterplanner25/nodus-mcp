@@ -7,7 +7,7 @@
 - **`--version` and the serve banners report the real version again.** 0.1.4
   shipped with `src/nodus_mcp/__init__.py` still on `"0.1.3"` while
   `pyproject.toml` said `0.1.4`, so the published 0.1.4 printed `nodus-mcp 0.1.3`
-  from `nodus-mcp --version` and from both the stdio and HTTP serve banners. The
+  from `nodus-mcp version` and from both the stdio and HTTP serve banners. The
   package itself was 0.1.4 in every other respect; only the string it reports was
   wrong.
 
