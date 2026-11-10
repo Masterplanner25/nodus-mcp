@@ -88,6 +88,31 @@ import "nodus-mcp"
 let result = tool.invoke("mcp.srv.my_tool", {x: 42})
 ```
 
+### Serve a `ToolRegistry` over the official SDK (`nodus_mcp_aindy`)
+
+`NodusServer` wraps the `mcp` SDK (1.x or 2.x; install it yourself) and has three
+transports: stdio, SSE (`run_sse_app()`), and streamable HTTP, the one ChatGPT and
+claude.ai use for remote servers:
+
+```python
+import uvicorn
+from nodus_mcp_aindy import NodusServer
+
+server = NodusServer(registry, auth_hook=check)   # check(name, args, context)
+app = server.streamable_http_app(                  # MCP endpoint at /mcp
+    routes=[...],       # your own routes, e.g. an OAuth authorization server
+    middleware=[...],   # e.g. a bearer check; scope["user"/"auth"] reach context
+)
+uvicorn.run(app, host="127.0.0.1", port=8000)
+```
+
+Add your routes through `routes=`, and do not `Mount` the app inside another.
+Starlette does not run a mounted app's lifespan, so the SDK session manager would
+never start. Stateless by default. Pass `security_settings=` to turn on the SDK's
+`Host`/`Origin` checking: with `None` it is off on both SDK majors. For a quick
+script, use `server.run(transport="streamable-http", port=8000)`. On a loopback
+bind, that turns the checking on for loopback names by default.
+
 ---
 
 ## Entry-point contract

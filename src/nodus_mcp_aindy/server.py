@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from .tool import ToolDefinition, ToolRegistry
 
@@ -104,7 +104,40 @@ def _request_meta(server: Any, ctx: Any = None) -> dict:
                 meta["headers"] = dict(headers)
             except Exception:
                 pass
+        # What host middleware authenticated, read from the ASGI scope rather
+        # than from a contextvar: Starlette's `AuthenticationMiddleware` (and
+        # anything shaped like it) leaves its result in `scope["user"]` /
+        # `scope["auth"]`, and the scope travels with the request object the
+        # transport attaches to each message. `request.user` would assert when
+        # no such middleware ran, so read the scope directly.
+        scope = getattr(request, "scope", None)
+        if isinstance(scope, dict):
+            for key in ("user", "auth"):
+                if key in scope:
+                    meta[key] = scope[key]
     return meta
+
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _loopback_security_settings(host: str) -> Any:
+    """DNS-rebinding protection for a loopback bind, or ``None`` for any other.
+
+    The same default the SDK's own FastMCP applies: a server on loopback
+    accepts only loopback ``Host`` and ``Origin`` values (any port). Elsewhere
+    the public name is not known here, so nothing is guessed.
+    """
+    if host not in _LOOPBACK_HOSTS:
+        return None
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    names = ("127.0.0.1", "localhost", "[::1]")
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[f"{n}:*" for n in names],
+        allowed_origins=[f"http://{n}:*" for n in names],
+    )
 
 
 class NodusServer:
@@ -117,10 +150,12 @@ class NodusServer:
         auth_hook:  Optional callable invoked before each tool call.
                     Signature: ``(tool_name: str, args: dict, context: dict) → None``.
                     *context* is a best-effort per-call dict — see
-                    :func:`_request_meta`. Over SSE/HTTP it carries
-                    ``session``, ``request_id``, ``request`` and ``headers``
-                    (e.g. the bearer token), enabling per-session identity
-                    mapping; over stdio it carries whatever the SDK exposes
+                    :func:`_request_meta`. Over SSE and streamable HTTP it
+                    carries ``session``, ``request_id``, ``request`` and
+                    ``headers`` (e.g. the bearer token), plus ``user`` and
+                    ``auth`` when host middleware authenticated the request
+                    (``scope["user"]`` / ``scope["auth"]``), enabling
+                    per-session identity mapping; over stdio it carries whatever the SDK exposes
                     (``session``/``request_id``) and is ``{}`` when no request
                     context is active. Raise any exception to deny the call.
     """
@@ -236,14 +271,44 @@ class NodusServer:
         opts = self._server.create_initialization_options()
         await self._server.run(read_stream, write_stream, opts)
 
-    def run(self, *, transport: str = "stdio") -> None:
+    def run(
+        self,
+        *,
+        transport: str = "stdio",
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        path: str = "/mcp",
+        security_settings: Any = None,
+    ) -> None:
         """Run the MCP server (blocking).
 
         Args:
-            transport: ``"stdio"`` (default) or ``"sse"``.
+            transport: ``"stdio"`` (default), ``"streamable-http"`` or ``"sse"``.
+            host, port, path: where ``"streamable-http"`` listens. Ignored for
+                stdio. The default bind is loopback.
+            security_settings: for ``"streamable-http"``. When ``None`` and
+                *host* is loopback, DNS-rebinding protection is **on**, allowing
+                only loopback ``Host``/``Origin`` values -- a local server is
+                exactly what a rebinding attack targets. On any other bind,
+                ``None`` leaves it off (the public name is unknown here); pass
+                settings that list it.
+
+        ``"streamable-http"`` serves :meth:`streamable_http_app` under uvicorn
+        -- a convenience for scripts. A deployment that needs its own routes or
+        middleware should build the app with :meth:`streamable_http_app` and
+        serve it itself.
 
         For production SSE deployment, use ``run_sse_app()`` with uvicorn.
         """
+        if transport == "streamable-http":
+            import uvicorn
+
+            if security_settings is None:
+                security_settings = _loopback_security_settings(host)
+            app = self.streamable_http_app(path=path, security_settings=security_settings)
+            uvicorn.run(app, host=host, port=port)
+            return
+
         import anyio
 
         if transport == "stdio":
@@ -262,7 +327,96 @@ class NodusServer:
                 "Example: uvicorn mymodule:sse_app --host 0.0.0.0 --port 8080"
             )
         else:
-            raise ValueError(f"Unknown transport: {transport!r}. Use 'stdio' or 'sse'.")
+            raise ValueError(
+                f"Unknown transport: {transport!r}. Use 'stdio', 'streamable-http' or 'sse'."
+            )
+
+    def streamable_http_app(
+        self,
+        *,
+        path: str = "/mcp",
+        stateless: bool = True,
+        json_response: bool = False,
+        security_settings: Any = None,
+        routes: Sequence[Any] = (),
+        middleware: Sequence[Any] = (),
+    ) -> Any:
+        """Return a Starlette app serving this server over streamable HTTP.
+
+        The MCP endpoint is one route at *path* (default ``/mcp``), handled by
+        the SDK's ``StreamableHTTPSessionManager``.
+
+        Args:
+            path:              where the MCP endpoint is served. Exact match;
+                               ``/mcp`` does not redirect to ``/mcp/``.
+            stateless:         a fresh transport per request, no session id
+                               (default). Needs no sticky sessions behind a
+                               proxy. ``False`` keeps per-session state in this
+                               process.
+            json_response:     answer each POST with a JSON body instead of an
+                               SSE stream.
+            security_settings: an ``mcp.server.transport_security.
+                               TransportSecuritySettings``, passed through. With
+                               ``None`` the SDK (both majors) does **no**
+                               ``Host``/``Origin`` checking. Behind a reverse
+                               proxy, enable it and list the public host name in
+                               ``allowed_hosts``, or the SDK refuses requests.
+            routes:            extra Starlette routes served by the same app
+                               (e.g. an OAuth authorization server's).
+            middleware:        Starlette ``Middleware`` wrapping the whole app,
+                               the MCP endpoint included. What it authenticates
+                               (``scope["user"]`` / ``scope["auth"]``) reaches
+                               ``auth_hook`` as ``context["user"]`` /
+                               ``context["auth"]``.
+
+        **Add routes here; do not ``Mount`` this app inside another.** The
+        session manager only runs inside this app's lifespan, and Starlette does
+        not run a mounted app's lifespan, so a mounted copy fails every request
+        with ``Task group is not initialized``. That is why *routes* and
+        *middleware* are parameters.
+
+        Each call builds a new session manager, which the SDK allows to run
+        once: build one app per server process.
+
+        Usage::
+
+            import uvicorn
+            uvicorn.run(server.streamable_http_app(), host="127.0.0.1", port=8000)
+        """
+        from contextlib import asynccontextmanager
+
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+
+        # Same constructor on both SDK majors for these four arguments; the
+        # majors differ only in defaults for the ones not passed (2.x adds
+        # body-size and session-count limits and an idle timeout).
+        manager = StreamableHTTPSessionManager(
+            self._server,
+            json_response=json_response,
+            stateless=stateless,
+            security_settings=security_settings,
+        )
+
+        class _Endpoint:
+            # A plain ASGI callable, so `Route` passes the raw scope through
+            # instead of wrapping it as a request/response endpoint -- which is
+            # what a bound method would get. `Mount` would also work, but turns
+            # `/mcp` into a redirect to `/mcp/`, which MCP clients do not follow.
+            async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+                await manager.handle_request(scope, receive, send)
+
+        @asynccontextmanager
+        async def lifespan(_app: Any) -> Any:
+            async with manager.run():
+                yield
+
+        return Starlette(
+            routes=[Route(path, endpoint=_Endpoint()), *routes],
+            middleware=list(middleware),
+            lifespan=lifespan,
+        )
 
     def run_sse_app(self) -> Any:
         """Return a Starlette application for SSE transport.
