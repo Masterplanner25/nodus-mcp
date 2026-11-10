@@ -1,5 +1,62 @@
 # nodus-mcp Changelog
 
+## [0.1.6] — unreleased
+
+### Added
+
+- **`NodusServer.streamable_http_app()`: streamable HTTP for `nodus_mcp_aindy`.**
+  It returns a Starlette app with the MCP endpoint at `path` (default `/mcp`),
+  handled by the SDK's `StreamableHTTPSessionManager`. This is the transport
+  ChatGPT and claude.ai use for remote MCP servers; before this release,
+  `NodusServer` only had stdio and SSE. Asked for by aindy-runtime (FR-66,
+  DEC-125). Additive.
+  - The session manager runs inside the app's lifespan. A Starlette app mounted
+    inside another does not get its lifespan run, so a mounted copy would fail
+    every request. Hosts therefore pass their own `routes=` and `middleware=` to
+    this app rather than mounting it.
+  - Stateless by default (`stateless=True`), so it needs no sticky sessions
+    behind a proxy. `json_response=` is passed through.
+  - `security_settings=` is passed through to the SDK. With `None`, both SDK
+    majors do **no** `Host`/`Origin` checking.
+  - The endpoint is an exact route, so `/mcp` is not redirected to `/mcp/`.
+- **`auth_hook`'s context now carries `user` and `auth`** when host middleware
+  set `scope["user"]` / `scope["auth"]`, for example Starlette's
+  `AuthenticationMiddleware`. They are read from the ASGI scope of the HTTP
+  request that carried the call, not from a contextvar. This works over SSE as
+  well as streamable HTTP. When no such middleware ran, the keys are absent.
+- **`run(transport="streamable-http", host=, port=, path=, security_settings=)`**
+  serves that app under uvicorn and blocks. The default bind is `127.0.0.1:8000`.
+  **On a loopback bind, DNS-rebinding protection is on by default**: only
+  loopback `Host` and `Origin` values are accepted, on any port. That is the
+  same default as the SDK's own FastMCP, and a local server is what a
+  rebinding attack targets. On any other bind, `None` leaves protection off,
+  because the public name is not known; pass settings that list it. Explicit
+  `security_settings` always win. `streamable_http_app()` itself stays
+  pass-through.
+
+### Why the identity comes from the scope, not a contextvar
+
+The tests settle the question, and the answer depends on the SDK major and the
+mode. A contextvar set by request middleware reaches the tool handler with the
+**right** request's value in stateless mode, on both majors, and in stateful
+mode on mcp 2.x. On **mcp 1.x in stateful mode, it is stale**: the session's
+server task starts inside the request that opened the session and keeps that
+request's context. Every later call then sees the opener's value, not `None`.
+An identity carried that way would belong to whoever opened the session. The
+scope is right on every major and mode, and
+`test_middleware_contextvar_vs_scope` asserts both halves.
+
+### Tests
+
+- `tests/test_streamable_http_end_to_end.py` serves the app under uvicorn and
+  drives it with the SDK's `streamable_http_client`. It covers stateless and
+  stateful modes, the tool schema, error results, a client header seen by the
+  hook, host routes and middleware in one app (a `401` with `WWW-Authenticate`
+  on `/mcp` before any MCP message, then `user`/`auth` in the hook), both
+  directions of `security_settings`, a custom `path`, and `run()`, including
+  a forged `Host` and a foreign `Origin` refused by `run()`'s loopback default.
+  The full suite, 376 tests, passes under both mcp 1.27.2 and 2.3.0.
+
 ## [0.1.5] — 2026-09-25
 
 ### Fixed
